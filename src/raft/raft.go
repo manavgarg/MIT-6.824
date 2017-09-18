@@ -263,7 +263,15 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// TODO: check the best position for this reset statement.
 	rf.electionTimeout.Reset(time.Millisecond * time.Duration((700 + rand.Intn(800))))
 
-	// check if the entry at previoous index is correct.
+	// Handling the case when there are no entries in the leader log and this is just a heartbeat.
+	if args.PrevLogIndex == -1 {
+		reply.Success = true
+		reply.Term = rf.currentTerm
+		rf.mu.Unlock()
+		return
+	}
+
+	// check if the entry at previous index is correct.
 	if args.PrevLogIndex > len(rf.log)-1 {
 		reply.Term = rf.currentTerm
 		reply.Success = false
@@ -363,56 +371,63 @@ func (rf *Raft) startAgreement() {
 		if i == rf.me {
 			continue
 		}
-		for {
-			rf.mu.Lock()
-			if rf.nextIndex[i] > (len(rf.log) - 1) {
-				//Entries already upto date at the follower, move on
-				break
-			}
-			prevLogIndex := rf.nextIndex[i] - 1
-			prevLogTerm := rf.log[prevLogIndex].term
-			//TODO: check the entries logic; should we just do one entry at a time ?
-			entries := make([]Log, (len(rf.log)-1)-prevLogIndex)
-			copy(entries, rf.log[rf.nextIndex[i]:])
-			arg := &AppendEntriesArgs{Term: rf.currentTerm, LeaderId: rf.me,
-				PrevLogIndex: prevLogIndex, PrevLogTerm: prevLogTerm,
-				Entries: entries, LeaderCommit: rf.commitIndex}
-			rf.mu.Unlock()
-
-			reply := &AppendEntriesReply{}
-			ok := rf.sendAppendEntries(i, arg, reply)
-			if !ok {
-				// Node unreachable, move on to the next
-				break
-			}
-
-			// TODO: Handle stale rpcs
-			if reply.Success {
-				//TODO: check for race condition when while this go routine we accept another command and append it to leader log
-				//TODO: make sure there is only one startAgreement goroutine at a time ?
+		go func(i int) {
+			for {
 				rf.mu.Lock()
-				rf.nextIndex[i] = len(rf.log)
-				rf.matchIndex[i] = len(rf.log)
+				if !rf.isLeader {
+					rf.mu.Unlock()
+					return
+				}
+
+				if rf.nextIndex[i] > (len(rf.log) - 1) {
+					//Entries already upto date at the follower, move on
+					return
+				}
+				prevLogIndex := rf.nextIndex[i] - 1
+				prevLogTerm := rf.log[prevLogIndex].term
+				//TODO: check the entries logic; should we just do one entry at a time ?
+				entries := make([]Log, (len(rf.log)-1)-prevLogIndex)
+				copy(entries, rf.log[rf.nextIndex[i]:])
+				arg := &AppendEntriesArgs{Term: rf.currentTerm, LeaderId: rf.me,
+					PrevLogIndex: prevLogIndex, PrevLogTerm: prevLogTerm,
+					Entries: entries, LeaderCommit: rf.commitIndex}
 				rf.mu.Unlock()
-				break
-			}
-			// Handling the false case.
-			rf.mu.Lock()
-			if reply.Term > rf.currentTerm {
-				rf.currentTerm = reply.Term
-				rf.votedFor = -1
-				rf.isLeader = false
-				rf.hasLeader = false
-				//TODO: check for commitIndex, lastApplied and log initialization ?
-				//TODO: should we just return at this point ?
+
+				reply := &AppendEntriesReply{}
+				ok := rf.sendAppendEntries(i, arg, reply)
+				if !ok {
+					// Node unreachable, continue indefinitely till it is up
+					continue
+				}
+
+				// TODO: Handle stale rpcs
+				if reply.Success {
+					//TODO: check for race condition when while this go routine we accept another command and append it to leader log
+					//TODO: make sure there is only one startAgreement goroutine at a time ?
+					rf.mu.Lock()
+					rf.nextIndex[i] = len(rf.log)
+					rf.matchIndex[i] = len(rf.log)
+					rf.mu.Unlock()
+					return
+				}
+				// Handling the false case.
+				rf.mu.Lock()
+				if reply.Term > rf.currentTerm {
+					rf.currentTerm = reply.Term
+					rf.votedFor = -1
+					rf.isLeader = false
+					rf.hasLeader = false
+					//TODO: check for commitIndex, lastApplied and log initialization ?
+					//TODO: should we just return at this point ?
+					rf.mu.Unlock()
+					return
+				} else {
+					// In this case, the prev entry is not correct, try again by decrementing the nextIndex
+					rf.nextIndex[i]--
+				}
 				rf.mu.Unlock()
-				return
-			} else {
-				// In this case, the prev entry is not correct, try again by decrementing the nextIndex
-				rf.nextIndex[i]--
 			}
-			rf.mu.Unlock()
-		}
+		}(i)
 	}
 }
 
@@ -506,6 +521,10 @@ func (rf *Raft) checkHeartbeat() {
 				// start sending heartbeats to others
 				rf.mu.Lock()
 				rf.isLeader = true
+				for i := 0; i < len(rf.peers); i++ {
+					rf.nextIndex[i] = len(rf.log)
+					rf.matchIndex[i] = 0
+				}
 				// TODO: What should be hasLeader if it becomes leader. Can the
 				// old value of hasLeader have an impact in the future.
 				rf.mu.Unlock()
@@ -529,7 +548,10 @@ func (rf *Raft) sendHeartbeat() {
 				rf.mu.Lock()
 
 				prevLogIndex := rf.nextIndex[i] - 1
-				prevLogTerm := rf.log[prevLogIndex].term
+				prevLogTerm := 0
+				if prevLogIndex != -1 {
+					prevLogTerm = rf.log[prevLogIndex].term
+				}
 				entries := make([]Log, 0)
 				arg := &AppendEntriesArgs{Term: rf.currentTerm, LeaderId: rf.me,
 					PrevLogIndex: prevLogIndex, PrevLogTerm: prevLogTerm,
@@ -564,6 +586,47 @@ func (rf *Raft) sendHeartbeat() {
 				}
 				rf.mu.Unlock()
 			}
+
+			// Logic to increment commitIndex at the Leader
+			// TODO: check if this is the right place to do this
+			if rf.isLeader {
+				rf.mu.Lock()
+				for i := len(rf.log) - 1; i > rf.commitIndex; i-- {
+					// TODO: check this
+					if rf.log[i].term != rf.currentTerm {
+						continue
+					}
+					majority := 1
+					for j := 0; j < len(rf.peers); j++ {
+						if j == rf.me {
+							continue
+						}
+						if rf.matchIndex[j] >= i {
+							majority++
+						}
+					}
+					if majority > len(rf.peers)/2 {
+						rf.commitIndex = i
+						break
+					}
+				}
+				rf.mu.Unlock()
+			}
+		}
+	}
+}
+
+func (rf *Raft) applyMsg(applyCh chan ApplyMsg) {
+	// TODO: check if the channel should be passed by value ?
+	ticker := time.NewTicker(time.Millisecond * 250)
+	for _ = range ticker.C {
+		if rf.commitIndex > rf.lastApplied {
+			rf.mu.Lock()
+			rf.lastApplied++
+			arg := ApplyMsg{Index: rf.log[rf.lastApplied].term,
+				Command: rf.log[rf.lastApplied].command}
+			rf.mu.Unlock()
+			applyCh <- arg
 		}
 	}
 }
@@ -596,7 +659,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	//TODO: do something for log
 	rf.commitIndex = 0
 	rf.lastApplied = 0
-	// TODO: do something for nextIndex and matchIndex
+	rf.nextIndex = make([]int, len(rf.peers))
+	rf.matchIndex = make([]int, len(rf.peers))
 	// TODO: check for timeout and isleader
 	// TODO check this:
 	// Heartbeat to be sent every 150 ms (since no more than 10 per second)
@@ -609,6 +673,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	go rf.sendHeartbeat()
 	go rf.checkHeartbeat()
+	// TODO: check if we need a seperate function for this or can this be merge with any of the above two
+	go rf.applyMsg(applyCh)
 	return rf
 }
 
