@@ -71,8 +71,8 @@ type Raft struct {
 }
 
 type Log struct {
-	command interface{}
-	term    int
+	Command interface{}
+	Term    int
 }
 
 // return currentTerm and whether this server
@@ -167,7 +167,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		myLastLogIndex := len(rf.log) - 1
 		myLastLogTerm := -1
 		if myLastLogIndex >= 0 {
-			myLastLogTerm = rf.log[myLastLogIndex].term
+			myLastLogTerm = rf.log[myLastLogIndex].Term
 		}
 		if args.LastLogTerm > myLastLogTerm {
 			requesterLogcheck = true
@@ -228,6 +228,11 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	return ok
 }
 
+type temp struct {
+	Command int
+	Term    int
+}
+
 type AppendEntriesArgs struct {
 	Term         int
 	LeaderId     int
@@ -278,7 +283,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.mu.Unlock()
 		return
 	}
-	if rf.log[args.PrevLogIndex].term != args.PrevLogTerm {
+	if rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
 		reply.Term = rf.currentTerm
 		reply.Success = false
 		rf.mu.Unlock()
@@ -289,7 +294,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// TODO: check if this & next section can be refactored... ideally might not need the top section.
 	if len(args.Entries) != 0 {
 		if len(rf.log) > args.PrevLogIndex+1 {
-			if rf.log[args.PrevLogIndex+1].term != args.Entries[0].term {
+			if rf.log[args.PrevLogIndex+1].Term != args.Entries[0].Term {
 				//TODO: check if implemented correctly.
 				rf.log = rf.log[:args.PrevLogIndex+1]
 			}
@@ -349,7 +354,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	} else {
 		// Start the agreement now for this entry.
 		rf.mu.Lock()
-		rf.log = append(rf.log, Log{command: command, term: rf.currentTerm})
+		rf.log = append(rf.log, Log{Command: command, Term: rf.currentTerm})
 		rf.mu.Unlock()
 		go rf.startAgreement()
 		return index, term, isLeader
@@ -384,7 +389,7 @@ func (rf *Raft) startAgreement() {
 					return
 				}
 				prevLogIndex := rf.nextIndex[i] - 1
-				prevLogTerm := rf.log[prevLogIndex].term
+				prevLogTerm := rf.log[prevLogIndex].Term
 				//TODO: check the entries logic; should we just do one entry at a time ?
 				entries := make([]Log, (len(rf.log)-1)-prevLogIndex)
 				copy(entries, rf.log[rf.nextIndex[i]:])
@@ -459,7 +464,7 @@ func (rf *Raft) checkHeartbeat() {
 			myLastLogIndex := len(rf.log) - 1
 			myLastLogTerm := -1
 			if myLastLogIndex >= 0 {
-				myLastLogTerm = rf.log[myLastLogIndex].term
+				myLastLogTerm = rf.log[myLastLogIndex].Term
 			}
 			arg := &RequestVoteArgs{Term: rf.currentTerm, CandidateId: rf.me,
 				LastLogIndex: myLastLogIndex, LastLogTerm: myLastLogTerm}
@@ -550,7 +555,7 @@ func (rf *Raft) sendHeartbeat() {
 				prevLogIndex := rf.nextIndex[i] - 1
 				prevLogTerm := 0
 				if prevLogIndex != -1 {
-					prevLogTerm = rf.log[prevLogIndex].term
+					prevLogTerm = rf.log[prevLogIndex].Term
 				}
 				entries := make([]Log, 0)
 				arg := &AppendEntriesArgs{Term: rf.currentTerm, LeaderId: rf.me,
@@ -593,7 +598,7 @@ func (rf *Raft) sendHeartbeat() {
 				rf.mu.Lock()
 				for i := len(rf.log) - 1; i > rf.commitIndex; i-- {
 					// TODO: check this
-					if rf.log[i].term != rf.currentTerm {
+					if rf.log[i].Term != rf.currentTerm {
 						continue
 					}
 					majority := 1
@@ -623,8 +628,8 @@ func (rf *Raft) applyMsg(applyCh chan ApplyMsg) {
 		if rf.commitIndex > rf.lastApplied {
 			rf.mu.Lock()
 			rf.lastApplied++
-			arg := ApplyMsg{Index: rf.log[rf.lastApplied].term,
-				Command: rf.log[rf.lastApplied].command}
+			arg := ApplyMsg{Index: rf.log[rf.lastApplied].Term,
+				Command: rf.log[rf.lastApplied].Command}
 			rf.mu.Unlock()
 			applyCh <- arg
 		}
