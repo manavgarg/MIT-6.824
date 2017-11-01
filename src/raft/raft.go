@@ -268,26 +268,32 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// TODO: check the best position for this reset statement.
 	rf.electionTimeout.Reset(time.Millisecond * time.Duration((700 + rand.Intn(800))))
 
-	// Handling the case when there are no entries in the leader log and this is just a heartbeat.
+	/*// Handling the case when there are no entries in the leader log and this is just a heartbeat.
 	if args.PrevLogIndex == -1 {
 		reply.Success = true
 		reply.Term = rf.currentTerm
 		rf.mu.Unlock()
 		return
-	}
+	}*/
 
 	// check if the entry at previous index is correct.
 	if args.PrevLogIndex > len(rf.log)-1 {
 		reply.Term = rf.currentTerm
+		fmt.Println("A")
 		reply.Success = false
 		rf.mu.Unlock()
 		return
 	}
-	if rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
-		reply.Term = rf.currentTerm
-		reply.Success = false
-		rf.mu.Unlock()
-		return
+	//fmt.Println("MANAV: prevlogindex:", args.PrevLogIndex)
+
+	if args.PrevLogIndex >= 0 {
+		if rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
+			reply.Term = rf.currentTerm
+			fmt.Println("B")
+			reply.Success = false
+			rf.mu.Unlock()
+			return
+		}
 	}
 
 	// check if an existing entry conflicts with the new one.
@@ -354,6 +360,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	} else {
 		// Start the agreement now for this entry.
 		rf.mu.Lock()
+		fmt.Println("start: ", command,"me: ", rf.me, "log len: ", len(rf.log))
 		rf.log = append(rf.log, Log{Command: command, Term: rf.currentTerm})
 		rf.mu.Unlock()
 		go rf.startAgreement()
@@ -384,12 +391,22 @@ func (rf *Raft) startAgreement() {
 					return
 				}
 
-				if rf.nextIndex[i] > (len(rf.log) - 1) {
+				if rf.nextIndex[i] > (len(rf.log)) {
 					//Entries already upto date at the follower, move on
 					return
 				}
+				//fmt.Println("MANAV here")
+
 				prevLogIndex := rf.nextIndex[i] - 1
-				prevLogTerm := rf.log[prevLogIndex].Term
+				prevLogTerm := 0
+				/*// TODO: handle the case when nextIndex keeps decreasing below zero.
+				if prevLogIndex < 0 {
+					prevLogIndex = 0
+					rf.nextIndex[i] = 0
+				}*/
+				if prevLogIndex >= 0 {
+					prevLogTerm = rf.log[prevLogIndex].Term
+				}
 				//TODO: check the entries logic; should we just do one entry at a time ?
 				entries := make([]Log, (len(rf.log)-1)-prevLogIndex)
 				copy(entries, rf.log[rf.nextIndex[i]:])
@@ -429,6 +446,7 @@ func (rf *Raft) startAgreement() {
 				} else {
 					// In this case, the prev entry is not correct, try again by decrementing the nextIndex
 					rf.nextIndex[i]--
+					fmt.Println("MANAV")
 				}
 				rf.mu.Unlock()
 			}
@@ -554,7 +572,7 @@ func (rf *Raft) sendHeartbeat() {
 
 				prevLogIndex := rf.nextIndex[i] - 1
 				prevLogTerm := 0
-				if prevLogIndex != -1 {
+				if prevLogIndex > -1 {
 					prevLogTerm = rf.log[prevLogIndex].Term
 				}
 				entries := make([]Log, 0)
@@ -610,8 +628,10 @@ func (rf *Raft) sendHeartbeat() {
 							majority++
 						}
 					}
+					fmt.Println("MANAV: majority", majority, " me:", rf.me, " i:", i, " commitindex:", rf.commitIndex)
 					if majority > len(rf.peers)/2 {
 						rf.commitIndex = i
+						fmt.Println("MANAV: Increasing commit index: ","rf.me: ", rf.me, "rf.commit: ", rf.commitIndex)
 						break
 					}
 				}
@@ -623,16 +643,20 @@ func (rf *Raft) sendHeartbeat() {
 
 func (rf *Raft) applyMsg(applyCh chan ApplyMsg) {
 	// TODO: check if the channel should be passed by value ?
-	ticker := time.NewTicker(time.Millisecond * 250)
+	ticker := time.NewTicker(time.Millisecond * 100)
 	for _ = range ticker.C {
+		//fmt.Println("Total log: %v, rf.me: \n", rf.log, rf.me)
 		if rf.commitIndex > rf.lastApplied {
 			rf.mu.Lock()
 			rf.lastApplied++
-			arg := ApplyMsg{Index: rf.log[rf.lastApplied].Term,
+			fmt.Println("MANAV test", "rf.me: ",rf.me, " ", rf.log[rf.lastApplied].Term, rf.log[rf.lastApplied].Command, "rf.commit: ", rf.commitIndex, "rf.lastap: ", rf.lastApplied)
+			arg := ApplyMsg{Index: rf.lastApplied+1,//rf.log[rf.lastApplied].Term,
+			//arg := ApplyMsg{Index: rf.log[rf.lastApplied].Term,
 				Command: rf.log[rf.lastApplied].Command}
 			rf.mu.Unlock()
 			applyCh <- arg
 		}
+		//time.Sleep(time.Millisecond * 500)
 	}
 }
 
@@ -662,8 +686,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.currentTerm = 0
 	rf.votedFor = -1
 	//TODO: do something for log
-	rf.commitIndex = 0
-	rf.lastApplied = 0
+	rf.commitIndex = -1
+	rf.lastApplied = -1
 	rf.nextIndex = make([]int, len(rf.peers))
 	rf.matchIndex = make([]int, len(rf.peers))
 	// TODO: check for timeout and isleader
