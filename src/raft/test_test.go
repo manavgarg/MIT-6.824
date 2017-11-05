@@ -94,7 +94,6 @@ func TestBasicAgree2B(t *testing.T) {
 		if xindex != index {
 			t.Fatalf("got index %v but expected %v", xindex, index)
 		}
-		fmt.Printf("MANAV: temp\n")
 	}
 
 	fmt.Printf("  ... Passed\n")

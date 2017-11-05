@@ -351,7 +351,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 //
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.mu.Lock()
-	index := len(rf.log)
+	index := len(rf.log)+1
 	term := rf.currentTerm
 	isLeader := rf.isLeader
 	rf.mu.Unlock()
@@ -360,7 +360,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	} else {
 		// Start the agreement now for this entry.
 		rf.mu.Lock()
-		fmt.Println("start: ", command,"me: ", rf.me, "log len: ", len(rf.log))
+		//fmt.Println("start: ", command,"me: ", rf.me, "log len: ", len(rf.log))
 		rf.log = append(rf.log, Log{Command: command, Term: rf.currentTerm})
 		rf.mu.Unlock()
 		go rf.startAgreement()
@@ -446,7 +446,7 @@ func (rf *Raft) startAgreement() {
 				} else {
 					// In this case, the prev entry is not correct, try again by decrementing the nextIndex
 					rf.nextIndex[i]--
-					fmt.Println("MANAV")
+					//fmt.Println("MANAV")
 				}
 				rf.mu.Unlock()
 			}
@@ -628,10 +628,10 @@ func (rf *Raft) sendHeartbeat() {
 							majority++
 						}
 					}
-					fmt.Println("MANAV: majority", majority, " me:", rf.me, " i:", i, " commitindex:", rf.commitIndex)
+					//fmt.Println("MANAV: majority", majority, " me:", rf.me, " i:", i, " commitindex:", rf.commitIndex)
 					if majority > len(rf.peers)/2 {
 						rf.commitIndex = i
-						fmt.Println("MANAV: Increasing commit index: ","rf.me: ", rf.me, "rf.commit: ", rf.commitIndex)
+						//fmt.Println("MANAV: Increasing commit index: ","rf.me: ", rf.me, "rf.commit: ", rf.commitIndex)
 						break
 					}
 				}
@@ -649,7 +649,7 @@ func (rf *Raft) applyMsg(applyCh chan ApplyMsg) {
 		if rf.commitIndex > rf.lastApplied {
 			rf.mu.Lock()
 			rf.lastApplied++
-			fmt.Println("MANAV test", "rf.me: ",rf.me, " ", rf.log[rf.lastApplied].Term, rf.log[rf.lastApplied].Command, "rf.commit: ", rf.commitIndex, "rf.lastap: ", rf.lastApplied)
+			//fmt.Println("MANAV test", "rf.me: ",rf.me, " ", rf.log[rf.lastApplied].Term, rf.log[rf.lastApplied].Command, "rf.commit: ", rf.commitIndex, "rf.lastap: ", rf.lastApplied)
 			arg := ApplyMsg{Index: rf.lastApplied+1,//rf.log[rf.lastApplied].Term,
 			//arg := ApplyMsg{Index: rf.log[rf.lastApplied].Term,
 				Command: rf.log[rf.lastApplied].Command}
