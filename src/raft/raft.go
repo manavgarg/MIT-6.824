@@ -317,7 +317,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// set commitIndex.
 	if args.LeaderCommit > rf.commitIndex {
 		if args.LeaderCommit > len(rf.log)-1 {
-			rf.commitIndex = len(rf.log) - 1
+			// rf.commitIndex = len(rf.log) - 1
+			rf.commitIndex = args.PrevLogIndex + len(args.Entries)
 		} else {
 			rf.commitIndex = args.LeaderCommit
 		}
@@ -428,8 +429,10 @@ func (rf *Raft) startAgreement() {
 					//TODO: check for race condition when while this go routine we accept another command and append it to leader log
 					//TODO: make sure there is only one startAgreement goroutine at a time ?
 					rf.mu.Lock()
-					rf.nextIndex[i] = len(rf.log)
-					rf.matchIndex[i] = len(rf.log)
+					//rf.nextIndex[i] = len(rf.log)
+					//rf.matchIndex[i] = len(rf.log)
+					rf.nextIndex[i] = arg.PrevLogIndex + len(arg.Entries) + 1
+					rf.matchIndex[i] = arg.PrevLogIndex + len(arg.Entries)
 					rf.mu.Unlock()
 					return
 				}

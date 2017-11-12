@@ -350,6 +350,8 @@ func TestBackup2B(t *testing.T) {
 	cfg.disconnect((leader1 + 3) % servers)
 	cfg.disconnect((leader1 + 4) % servers)
 
+	fmt.Println("MANAV 1")
+
 	// submit lots of commands that won't commit
 	for i := 0; i < 50; i++ {
 		cfg.rafts[leader1].Start(rand.Int())
@@ -359,6 +361,7 @@ func TestBackup2B(t *testing.T) {
 
 	cfg.disconnect((leader1 + 0) % servers)
 	cfg.disconnect((leader1 + 1) % servers)
+	fmt.Println("MANAV 2")
 
 	// allow other partition to recover
 	cfg.connect((leader1 + 2) % servers)
@@ -370,6 +373,7 @@ func TestBackup2B(t *testing.T) {
 		cfg.one(rand.Int(), 3)
 	}
 
+	fmt.Println("MANAV 3")
 	// now another partitioned leader and one follower
 	leader2 := cfg.checkOneLeader()
 	other := (leader1 + 2) % servers
@@ -383,6 +387,7 @@ func TestBackup2B(t *testing.T) {
 		cfg.rafts[leader2].Start(rand.Int())
 	}
 
+	fmt.Println("MANAV 4")
 	time.Sleep(RaftElectionTimeout / 2)
 
 	// bring original leader back to life,
@@ -393,10 +398,12 @@ func TestBackup2B(t *testing.T) {
 	cfg.connect((leader1 + 1) % servers)
 	cfg.connect(other)
 
+	fmt.Println("MANAV 5")
 	// lots of successful commands to new group.
 	for i := 0; i < 50; i++ {
 		cfg.one(rand.Int(), 3)
 	}
+	fmt.Println("MANAV 6")
 
 	// now everyone
 	for i := 0; i < servers; i++ {
