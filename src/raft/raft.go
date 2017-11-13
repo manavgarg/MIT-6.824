@@ -67,14 +67,14 @@ type Raft struct {
 	// TODO: check if really need all or can get away with a few of them ?
 	electionTimeout *time.Timer
 	isLeader        bool
+	hasLeader		bool
+	electionTimeoutVal int
 }
 
 type Log struct {
 	Command interface{}
 	Term    int
 }
-
-var electionTimeoutVal int
 
 var killAllGoRoutines bool
 
@@ -186,7 +186,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			reply.Term = rf.currentTerm
 			reply.VoteGranted = true
 			rf.votedFor = args.CandidateId
-			rf.electionTimeout.Reset(time.Millisecond * time.Duration(electionTimeoutVal))
+			rf.electionTimeout.Reset(time.Millisecond * time.Duration(rf.electionTimeoutVal))
 			//fmt.Println("At: ",rf.me, " candi:", args.CandidateId," scene 2")
 		} else {
 			reply.Term = rf.currentTerm
@@ -196,7 +196,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	} else {
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = false
-		//fmt.Println("At: ",rf.me, " candi:", args.CandidateId," scene 4")
+		//fmt.Println("At: ",rf.me, " candi:", args.CandidateId,"voted for: ", rf.me," scene 4")
 	}
 	rf.mu.Unlock()
 }
@@ -271,8 +271,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.currentTerm = args.Term
 		rf.votedFor = -1
 	}
-	//fmt.Println("Got Heartbeat from ",args.LeaderId," for", rf.me, "at ",time.Now())
-	rf.electionTimeout.Reset(time.Millisecond * time.Duration(electionTimeoutVal))
+	//fmt.Println("Got Heartbeat from ",args.LeaderId," for", rf.me," term:", rf.currentTerm, " at ",time.Now())
+	rf.electionTimeout.Reset(time.Millisecond * time.Duration(rf.electionTimeoutVal))
+	rf.hasLeader = true
 
 	// check if the entry at previous index is correct.
 	if args.PrevLogIndex > len(rf.log)-1 {
@@ -282,7 +283,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.mu.Unlock()
 		return
 	}
-	//fmt.Println("MANAV: prevlogindex:", args.PrevLogIndex)
 
 	if args.PrevLogIndex >= 0 {
 		if rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
@@ -429,8 +429,6 @@ func (rf *Raft) startAgreement() {
 					//TODO: check for race condition when while this go routine we accept another command and append it to leader log
 					//TODO: make sure there is only one startAgreement goroutine at a time ?
 					rf.mu.Lock()
-					//rf.nextIndex[i] = len(rf.log)
-					//rf.matchIndex[i] = len(rf.log)
 					rf.nextIndex[i] = arg.PrevLogIndex + len(arg.Entries) + 1
 					rf.matchIndex[i] = arg.PrevLogIndex + len(arg.Entries)
 					rf.mu.Unlock()
@@ -442,6 +440,7 @@ func (rf *Raft) startAgreement() {
 					rf.currentTerm = reply.Term
 					rf.votedFor = -1
 					rf.isLeader = false
+					rf.hasLeader = false
 					//TODO: check for commitIndex, lastApplied and log initialization ?
 					//TODO: should we just return at this point ?
 					rf.mu.Unlock()
@@ -462,17 +461,17 @@ func (rf *Raft) checkHeartbeat() {
 			return
 		}
 		<-rf.electionTimeout.C
+		rf.hasLeader = false
 
 		// As the Leader doesn't send heartbeat to itself, if it is leader,
 		// we can ignore this
 		if !rf.isLeader {
-		restart:
 			// Will now become candidate and requestvotes.
 			rf.mu.Lock()
 			rf.currentTerm++
 			rf.votedFor = rf.me
 
-			rf.electionTimeout.Reset(time.Millisecond * time.Duration(electionTimeoutVal))
+			rf.electionTimeout.Reset(time.Millisecond * time.Duration(rf.electionTimeoutVal))
 
 			myLastLogIndex := len(rf.log) - 1
 			myLastLogTerm := -1
@@ -487,6 +486,7 @@ func (rf *Raft) checkHeartbeat() {
 			//fmt.Printf("In peer: %d, currentTerm = %d\n", rf.me, rf.currentTerm)
 
 			// Randomly pick nodes to send requestVote RPC.
+			rand.Seed(int64(rf.me*100000 + 10000))
 			perm := rand.Perm(len(rf.peers))
 			for _, i := range perm {
 				if i == rf.me {
@@ -494,19 +494,30 @@ func (rf *Raft) checkHeartbeat() {
 				}
 				reply := &RequestVoteReply{}
 
-				//fmt.Println("Starting Leader election at ",rf.me," for:",i," term:",rf.currentTerm, " at:",time.Now())
-				// As the rpc implement timeouts, call should eventually return
-				ok := rf.sendRequestVote(i, arg, reply)
-				if !ok {
-					//fmt.Println("failed requestvote at ",rf.me," for:",i," term:",rf.currentTerm, " at:",time.Now())
-					continue
-				}
+
+				var ok bool
+				out := make(chan bool, 1)
+				go func() {
+					res := rf.sendRequestVote(i, arg, reply)
+					out<-res
+				}()
 
 				// If the timeout occurs, start the election process again.
 				select {
 				case <-rf.electionTimeout.C:
-					goto restart
-				default:
+					rf.electionTimeout.Reset(time.Millisecond * time.Duration(rf.electionTimeoutVal))
+					goto endf
+				case ok = <-out:
+				}
+
+				//fmt.Println("Starting Leader election at ",rf.me," for:",i," term:",rf.currentTerm, " at:",time.Now())
+				if !ok {
+					//fmt.Println("failed requestvote at ",rf.me," for:",i," term:",rf.currentTerm, " at:",time.Now())
+					if rf.hasLeader || (rf.votedFor != rf.me) {
+						//fmt.Println(" at:", rf.me,"??????????",rf.electionTimeoutVal)
+						goto endf
+					}
+					continue
 				}
 
 				// To prevent Term Confusion (because of stale rpcs)
@@ -515,7 +526,8 @@ func (rf *Raft) checkHeartbeat() {
 				}
 
 				rf.mu.Lock()
-				if rf.votedFor != rf.me {
+				if rf.hasLeader || (rf.votedFor != rf.me) {
+				//if rf.votedFor != rf.me {
 					// This means that we got an AppendEntries RPC,
 					// thus should convert to follower
 					rf.mu.Unlock()
@@ -530,6 +542,7 @@ func (rf *Raft) checkHeartbeat() {
 						rf.votedFor = -1
 					}
 					rf.mu.Unlock()
+					rf.electionTimeout.Reset(time.Millisecond * time.Duration(rf.electionTimeoutVal))
 					goto endf
 				} else {
 					//fmt.Println("Vote recvd at ",rf.me," from:",i," term:",rf.currentTerm)
@@ -588,13 +601,13 @@ func (rf *Raft) sendHeartbeat() {
 					rf.mu.Unlock()
 
 					reply := &AppendEntriesReply{}
-					//fmt.Println("sending heartbeat at ",rf.me," for", i, "at ",time.Now())
+					//fmt.Println("sending heartbeat at ",rf.me," for", i, " term: ", rf.currentTerm," at ",time.Now())
 					ok := rf.sendAppendEntries(i, arg, reply)
 					if !ok {
 						// Node unreachable, move on to the next
 						return
 					}
-					//fmt.Println("getiing heartbeat reply at ",rf.me," for", i, "at ",time.Now())
+					//fmt.Println("getiing heartbeat reply at ",rf.me," for", i, " term: ", rf.currentTerm," at ",time.Now())
 
 					// Handle stale rpcs
 					if arg.Term != rf.currentTerm {
@@ -607,6 +620,7 @@ func (rf *Raft) sendHeartbeat() {
 							rf.currentTerm = reply.Term
 							rf.votedFor = -1
 							rf.isLeader = false
+							rf.hasLeader = false
 							rf.mu.Unlock()
 							return
 						} else {
@@ -706,9 +720,11 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// Thus, eleaction timout should be randomly chosen each time between
 	// (350-800 ms); need to elect a leader within 5 secs
 	rand.Seed(int64(rf.me*100000 + 10000))
-	electionTimeoutVal = 200 + rand.Intn(700)
-	rf.electionTimeout = time.NewTimer(time.Millisecond * time.Duration(electionTimeoutVal))
+	rf.electionTimeoutVal = 200 + rand.Intn(700)
+	fmt.Println("ELECTION VALUE at ",rf.me," is:",rf.electionTimeoutVal)
+	rf.electionTimeout = time.NewTimer(time.Millisecond * time.Duration(rf.electionTimeoutVal))
 	rf.isLeader = false
+	rf.hasLeader = false
 
 	killAllGoRoutines = false
 	go rf.sendHeartbeat()
