@@ -278,7 +278,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// check if the entry at previous index is correct.
 	if args.PrevLogIndex > len(rf.log)-1 {
 		reply.Term = rf.currentTerm
-		//fmt.Println("A")
 		reply.Success = false
 		rf.mu.Unlock()
 		return
@@ -287,7 +286,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if args.PrevLogIndex >= 0 {
 		if rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
 			reply.Term = rf.currentTerm
-			//fmt.Println("B")
 			reply.Success = false
 			rf.mu.Unlock()
 			return
@@ -299,7 +297,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if len(args.Entries) != 0 {
 		if len(rf.log) > args.PrevLogIndex+1 {
 			if rf.log[args.PrevLogIndex+1].Term != args.Entries[0].Term {
-				//TODO: check if implemented correctly.
 				rf.log = rf.log[:args.PrevLogIndex+1]
 			}
 		}
@@ -316,8 +313,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	// set commitIndex.
 	if args.LeaderCommit > rf.commitIndex {
-		if args.LeaderCommit > len(rf.log)-1 {
-			// rf.commitIndex = len(rf.log) - 1
+		if args.LeaderCommit > (args.PrevLogIndex + len(args.Entries)) {
 			rf.commitIndex = args.PrevLogIndex + len(args.Entries)
 		} else {
 			rf.commitIndex = args.LeaderCommit
@@ -732,3 +728,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	go rf.applyMsg(applyCh)
 	return rf
 }
+
+// TODO: (Further Design Improvements till 2B):
+// 1. See if the electionTimeut values can be more streamlined and well defined.
+// 2. See if the requesvote logic in checkHeartbeat can be improved. Can it be done in parallel and not break once the majority is received ?
+// 3. See if we can get away with hasLeaser.
+// 4. Check the apppendEntries logic for log matching and appending.
