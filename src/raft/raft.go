@@ -63,11 +63,15 @@ type Raft struct {
 	nextIndex  []int
 	matchIndex []int
 
-	// state added by me to assist with implementation.
+	// additional state added by me to assist with implementation.
 	// TODO: check if really need all or can get away with a few of them ?
 	electionTimeout *time.Timer
 	isLeader        bool
-	hasLeader		bool
+	// hasLeader is only required for the edge case: when a node is requesting
+	// votes and it receives an appendEntry with the same term. In such a case,
+	// just checking rf.votedFor would not be sufficient, as it would have voted
+	// for itself and not the leader.
+	hasLeader          bool
 	electionTimeoutVal int
 }
 
@@ -255,7 +259,6 @@ type AppendEntriesReply struct {
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
-	// TODO: Handle the race condition when this node is requesting vote itself
 	rf.mu.Lock()
 	//If current term greater than the one at leader, reply false & return
 	if args.Term < rf.currentTerm {
@@ -292,19 +295,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		}
 	}
 
-	// check if an existing entry conflicts with the new one.
-	// TODO: check if this & next section can be refactored... ideally might not need the top section.
-	if len(args.Entries) != 0 {
-		if len(rf.log) > args.PrevLogIndex+1 {
-			if rf.log[args.PrevLogIndex+1].Term != args.Entries[0].Term {
-				rf.log = rf.log[:args.PrevLogIndex+1]
-			}
-		}
-	}
-
-	// append new entries not already in the log.
+	// check if an existing entry conflicts with the new one and append new
+	// entries not already in the log.
 	for i := 0; i < len(args.Entries); i++ {
 		if len(rf.log) > args.PrevLogIndex+1+i {
+			if rf.log[args.PrevLogIndex+1+i].Term != args.Entries[i].Term {
+				rf.log = rf.log[:args.PrevLogIndex+1+i+1]
+			}
 			rf.log[args.PrevLogIndex+1+i] = args.Entries[i]
 		} else {
 			rf.log = append(rf.log, args.Entries[i])
@@ -350,17 +347,15 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	term := rf.currentTerm
 	isLeader := rf.isLeader
 	rf.mu.Unlock()
-	if !isLeader {
-		return index, term, isLeader
-	} else {
+	if isLeader {
 		// Start the agreement now for this entry.
 		rf.mu.Lock()
 		//fmt.Println("start: ", command,"me: ", rf.me, "log len: ", len(rf.log))
 		rf.log = append(rf.log, Log{Command: command, Term: rf.currentTerm})
 		rf.mu.Unlock()
 		go rf.startAgreement()
-		return index, term, isLeader
 	}
+	return index, term, isLeader
 }
 
 //
@@ -382,6 +377,8 @@ func (rf *Raft) startAgreement() {
 			continue
 		}
 		go func(i int) {
+			// Keep on trying indefinitely till the log entry is replicated on
+			// the node.
 			for {
 				rf.mu.Lock()
 				if !rf.isLeader {
@@ -391,9 +388,9 @@ func (rf *Raft) startAgreement() {
 
 				if rf.nextIndex[i] > (len(rf.log)) {
 					//Entries already upto date at the follower, move on
+					rf.mu.Unlock()
 					return
 				}
-				//fmt.Println("MANAV here")
 
 				prevLogIndex := rf.nextIndex[i] - 1
 				prevLogTerm := 0
@@ -401,7 +398,6 @@ func (rf *Raft) startAgreement() {
 				if prevLogIndex >= 0 {
 					prevLogTerm = rf.log[prevLogIndex].Term
 				}
-				//TODO: check the entries logic; should we just do one entry at a time ?
 				entries := make([]Log, (len(rf.log)-1)-prevLogIndex)
 				copy(entries, rf.log[rf.nextIndex[i]:])
 				arg := &AppendEntriesArgs{Term: rf.currentTerm, LeaderId: rf.me,
@@ -437,8 +433,6 @@ func (rf *Raft) startAgreement() {
 					rf.votedFor = -1
 					rf.isLeader = false
 					rf.hasLeader = false
-					//TODO: check for commitIndex, lastApplied and log initialization ?
-					//TODO: should we just return at this point ?
 					rf.mu.Unlock()
 					return
 				} else {
@@ -451,13 +445,12 @@ func (rf *Raft) startAgreement() {
 	}
 }
 
-func (rf *Raft) checkHeartbeat() {
+func (rf *Raft) electLeader() {
 	for {
 		if killAllGoRoutines {
 			return
 		}
 		<-rf.electionTimeout.C
-		rf.hasLeader = false
 
 		// As the Leader doesn't send heartbeat to itself, if it is leader,
 		// we can ignore this
@@ -465,6 +458,7 @@ func (rf *Raft) checkHeartbeat() {
 			// Will now become candidate and requestvotes.
 			rf.mu.Lock()
 			rf.currentTerm++
+			rf.hasLeader = false
 			rf.votedFor = rf.me
 
 			rf.electionTimeout.Reset(time.Millisecond * time.Duration(rf.electionTimeoutVal))
@@ -490,12 +484,11 @@ func (rf *Raft) checkHeartbeat() {
 				}
 				reply := &RequestVoteReply{}
 
-
 				var ok bool
 				out := make(chan bool, 1)
 				go func() {
 					res := rf.sendRequestVote(i, arg, reply)
-					out<-res
+					out <- res
 				}()
 
 				// If the timeout occurs, start the election process again.
@@ -509,10 +502,6 @@ func (rf *Raft) checkHeartbeat() {
 				//fmt.Println("Starting Leader election at ",rf.me," for:",i," term:",rf.currentTerm, " at:",time.Now())
 				if !ok {
 					//fmt.Println("failed requestvote at ",rf.me," for:",i," term:",rf.currentTerm, " at:",time.Now())
-					if rf.hasLeader || (rf.votedFor != rf.me) {
-						//fmt.Println(" at:", rf.me,"??????????",rf.electionTimeoutVal)
-						goto endf
-					}
 					continue
 				}
 
@@ -523,7 +512,6 @@ func (rf *Raft) checkHeartbeat() {
 
 				rf.mu.Lock()
 				if rf.hasLeader || (rf.votedFor != rf.me) {
-				//if rf.votedFor != rf.me {
 					// This means that we got an AppendEntries RPC,
 					// thus should convert to follower
 					rf.mu.Unlock()
@@ -544,6 +532,7 @@ func (rf *Raft) checkHeartbeat() {
 					//fmt.Println("Vote recvd at ",rf.me," from:",i," term:",rf.currentTerm)
 					votesRecvd++
 				}
+
 				if votesRecvd >= ((len(rf.peers) / 2) + 1) {
 					break
 				}
@@ -600,7 +589,7 @@ func (rf *Raft) sendHeartbeat() {
 					//fmt.Println("sending heartbeat at ",rf.me," for", i, " term: ", rf.currentTerm," at ",time.Now())
 					ok := rf.sendAppendEntries(i, arg, reply)
 					if !ok {
-						// Node unreachable, move on to the next
+						// Node unreachable so just return
 						return
 					}
 					//fmt.Println("getiing heartbeat reply at ",rf.me," for", i, " term: ", rf.currentTerm," at ",time.Now())
@@ -705,32 +694,30 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// Your initialization code here (2A, 2B, 2C).
 	rf.currentTerm = 0
 	rf.votedFor = -1
-	//TODO: do something for log
 	rf.commitIndex = -1
 	rf.lastApplied = -1
 	rf.nextIndex = make([]int, len(rf.peers))
 	rf.matchIndex = make([]int, len(rf.peers))
-	// TODO: check for timeout and isleader
 	// TODO check this:
 	// Heartbeat to be sent every 150 ms (since no more than 10 per second)
 	// Thus, eleaction timout should be randomly chosen each time between
-	// (350-800 ms); need to elect a leader within 5 secs
+	// (200-900 ms); need to elect a leader within 5 secs
 	rand.Seed(int64(rf.me*100000 + 10000))
 	rf.electionTimeoutVal = 200 + rand.Intn(700)
-	fmt.Println("ELECTION VALUE at ",rf.me," is:",rf.electionTimeoutVal)
+	fmt.Println("ELECTION VALUE at ", rf.me, " is:", rf.electionTimeoutVal)
 	rf.electionTimeout = time.NewTimer(time.Millisecond * time.Duration(rf.electionTimeoutVal))
 	rf.isLeader = false
 	rf.hasLeader = false
 
 	killAllGoRoutines = false
 	go rf.sendHeartbeat()
-	go rf.checkHeartbeat()
+	go rf.electLeader()
 	go rf.applyMsg(applyCh)
 	return rf
 }
 
 // TODO: (Further Design Improvements till 2B):
 // 1. See if the electionTimeut values can be more streamlined and well defined.
-// 2. See if the requesvote logic in checkHeartbeat can be improved. Can it be done in parallel and not break once the majority is received ?
+// 2. See if the requesvote logic in electLeader can be improved. Can it be done in parallel and not break once the majority is received ?
 // 3. See if we can get away with hasLeaser.
 // 4. Check the apppendEntries logic for log matching and appending.
