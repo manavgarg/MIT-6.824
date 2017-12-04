@@ -79,7 +79,7 @@ type Log struct {
 	Term    int
 }
 
-var killAllGoRoutines bool
+//var killAllGoRoutines bool
 
 // return CurrentTerm and whether this server
 // believes it is the leader.
@@ -193,7 +193,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			reply.VoteGranted = true
 			rf.VotedFor = args.CandidateId
 			rf.electionTimeout.Reset(time.Millisecond * time.Duration(rf.electionTimeoutVal))
-			//fmt.Println("At: ",rf.me, " candi:", args.CandidateId," scene 2")
+			//fmt.Println("At: ",rf.me, " candi:", args.CandidateId," scene 2","log: ", rf.Log)
 		} else {
 			reply.Term = rf.CurrentTerm
 			reply.VoteGranted = false
@@ -359,6 +359,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		rf.mu.Lock()
 		//fmt.Println("start: ", command,"me: ", rf.me, "Log len: ", len(rf.Log))
 		rf.Log = append(rf.Log, Log{Command: command, Term: rf.CurrentTerm})
+		rf.persist()
 		rf.mu.Unlock()
 		go rf.startAgreement()
 	}
@@ -373,9 +374,9 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 //
 func (rf *Raft) Kill() {
 	// Your code here, if desired.
-	fmt.Println(rf.Log)
-	killAllGoRoutines = true
-	time.Sleep(5 * time.Second)
+	fmt.Println(rf.Log, "at: ",rf.me)
+	//killAllGoRoutines = true
+	//time.Sleep(5 * time.Second)
 }
 
 func (rf *Raft) startAgreement() {
@@ -454,9 +455,9 @@ func (rf *Raft) startAgreement() {
 
 func (rf *Raft) electLeader() {
 	for {
-		if killAllGoRoutines {
+		/*if killAllGoRoutines {
 			return
-		}
+		}*/
 		<-rf.electionTimeout.C
 
 		// As the Leader doesn't send heartbeat to itself, if it is leader,
@@ -480,69 +481,71 @@ func (rf *Raft) electLeader() {
 			rf.mu.Unlock()
 
 			votesRecvd := 1
-			//fmt.Printf("In peer: %d, CurrentTerm = %d\n", rf.me, rf.CurrentTerm)
+			//fmt.Printf("In peer: %d, CurrentTerm = %d  at:%v\n", rf.me, rf.CurrentTerm,time.Now())
 
-			// Randomly pick nodes to send requestVote RPC.
-			rand.Seed(int64(rf.me*100000 + 10000))
-			perm := rand.Perm(len(rf.peers))
-			for _, i := range perm {
+			out := make(chan bool, 1)
+			var shouldBreak bool
+			for i := 0; i < len(rf.peers); i++ {
 				if i == rf.me {
 					continue
 				}
-				reply := &RequestVoteReply{}
+				go func(i int) {
+					reply := &RequestVoteReply{}
 
-				var ok bool
-				out := make(chan bool, 1)
-				go func() {
-					res := rf.sendRequestVote(i, arg, reply)
-					out <- res
-				}()
+					ok := rf.sendRequestVote(i, arg, reply)
+					if !ok {
+						//fmt.Println("failed requestvote at ",rf.me," for:",i," term:",rf.CurrentTerm, " at:",time.Now())
+						out <- ok
+						return
+					}
 
-				// If the timeout occurs, start the election process again.
-				select {
+					// To prevent Term Confusion (because of stale rpcs)
+					if arg.Term != rf.CurrentTerm {
+						shouldBreak = true
+						out <- ok
+						return
+					}
+
+					if rf.hasLeader || (rf.VotedFor != rf.me) {
+						// This means that we got an AppendEntries RPC,
+						// thus should convert to follower
+						shouldBreak = true
+						out <- ok
+						return
+					}
+
+					if reply.VoteGranted == false {
+						rf.mu.Lock()
+						if reply.Term > rf.CurrentTerm {
+							rf.CurrentTerm = reply.Term
+							rf.VotedFor = -1
+							shouldBreak = true
+						}
+						rf.mu.Unlock()
+					} else {
+						//fmt.Println("Vote recvd at ",rf.me," from:",i," term:",rf.CurrentTerm)
+						votesRecvd++
+					}
+					out <- ok
+				}(i)
+			}
+			respCount := 1
+			loop:
+			// If the timeout occurs, start the election process again.
+			select {
 				case <-rf.electionTimeout.C:
 					rf.electionTimeout.Reset(time.Millisecond * time.Duration(rf.electionTimeoutVal))
 					goto endf
-				case ok = <-out:
-				}
-
-				//fmt.Println("Starting Leader election at ",rf.me," for:",i," term:",rf.CurrentTerm, " at:",time.Now())
-				if !ok {
-					//fmt.Println("failed requestvote at ",rf.me," for:",i," term:",rf.CurrentTerm, " at:",time.Now())
-					continue
-				}
-
-				// To prevent Term Confusion (because of stale rpcs)
-				if arg.Term != rf.CurrentTerm {
-					goto endf
-				}
-
-				rf.mu.Lock()
-				if rf.hasLeader || (rf.VotedFor != rf.me) {
-					// This means that we got an AppendEntries RPC,
-					// thus should convert to follower
-					rf.mu.Unlock()
-					goto endf
-				}
-				rf.mu.Unlock()
-
-				if reply.VoteGranted == false {
-					rf.mu.Lock()
-					if reply.Term > rf.CurrentTerm {
-						rf.CurrentTerm = reply.Term
-						rf.VotedFor = -1
+				case <-out:
+					if shouldBreak {
+						goto endf
 					}
-					rf.mu.Unlock()
-					rf.electionTimeout.Reset(time.Millisecond * time.Duration(rf.electionTimeoutVal))
-					goto endf
-				} else {
-					//fmt.Println("Vote recvd at ",rf.me," from:",i," term:",rf.CurrentTerm)
-					votesRecvd++
-				}
-
-				if votesRecvd >= ((len(rf.peers) / 2) + 1) {
-					break
-				}
+					if (votesRecvd >= ((len(rf.peers) / 2) + 1)) || respCount == len(rf.peers) {
+						break
+					}
+					if respCount < len(rf.peers) {
+						goto loop
+					}
 			}
 			// Check if got majority votes, if yes, become leader
 			if votesRecvd >= ((len(rf.peers) / 2) + 1) {
@@ -550,7 +553,7 @@ func (rf *Raft) electLeader() {
 				// start sending heartbeats to others
 				rf.mu.Lock()
 				rf.isLeader = true
-				//fmt.Println("Leader is ",rf.me," term: ",rf.CurrentTerm)
+				//fmt.Println("Leader is ",rf.me," term: ",rf.CurrentTerm, " at:",time.Now(), "log: ",rf.Log)
 				for i := 0; i < len(rf.peers); i++ {
 					rf.nextIndex[i] = len(rf.Log)
 					rf.matchIndex[i] = 0
@@ -567,9 +570,9 @@ func (rf *Raft) sendHeartbeat() {
 	// TODO: should the leader send heartbeat to itself ? Ideally, should not
 	ticker := time.NewTicker(time.Millisecond * 150)
 	for _ = range ticker.C {
-		if killAllGoRoutines {
+		/*if killAllGoRoutines {
 			return
-		}
+		}*/
 		if rf.isLeader {
 			//fmt.Println("ENTERING HEARTBEAT for ", rf.me)
 			for i := 0; i < len(rf.peers); i++ {
@@ -633,10 +636,9 @@ func (rf *Raft) sendHeartbeat() {
 func (rf *Raft) applyMsg(applyCh chan ApplyMsg) {
 	ticker := time.NewTicker(time.Millisecond * 100)
 	for _ = range ticker.C {
-		if killAllGoRoutines {
+		/*if killAllGoRoutines {
 			return
-		}
-
+		}*/
 		// Logic to increment commitIndex at the Leader
 		if rf.isLeader {
 			rf.mu.Lock()
@@ -656,7 +658,7 @@ func (rf *Raft) applyMsg(applyCh chan ApplyMsg) {
 				//fmt.Println("MANAV: majority", majority, " me:", rf.me, " i:", i, " commitindex:", rf.commitIndex)
 				if majority > len(rf.peers)/2 {
 					rf.commitIndex = i
-					//fmt.Println("MANAV: Increasing commit index: ","rf.me: ", rf.me, "rf.commit: ", rf.commitIndex)
+					//fmt.Println("MANAV: Increasing commit index: ","rf.me: ", rf.me, "rf.commit: ", rf.commitIndex, "rf.log: ",rf.Log)
 					break
 				}
 			}
@@ -696,6 +698,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
+	fmt.Println("ME: ",rf.me," LOG IS ", rf.Log, " CURRENT TERM IS ",rf.CurrentTerm, " Voted for is:", rf.VotedFor)
 
 	// Initialize the other state values.
 	rf.commitIndex = -1
@@ -713,7 +716,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	fmt.Println("ELECTION VALUE at ", rf.me, " is:", rf.electionTimeoutVal)
 	rf.electionTimeout = time.NewTimer(time.Millisecond * time.Duration(rf.electionTimeoutVal))
 
-	killAllGoRoutines = false
+	//killAllGoRoutines = false
 	go rf.sendHeartbeat()
 	go rf.electLeader()
 	go rf.applyMsg(applyCh)
@@ -721,6 +724,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 }
 
 // TODO: (Further Design Improvements till 2B):
+// 0. killAllGoRoutines impacts the persistence tests. The only reason to had them in the first place was to be able to run all the tests sequentially (as otherwise the the spawned goroutines of previous tests would impact later tests). However, this might not be required from the point of view of correctness.
+
 // 1. See if the electionTimeut values can be more streamlined and well defined.
 // 2. See if the requesvote Logic in electLeader can be improved. Can it be done in parallel and not break once the majority is received ?
 // 3. See if we can get away with hasLeaser.

@@ -532,6 +532,7 @@ func TestPersist12C(t *testing.T) {
 	fmt.Printf("Test (2C): basic persistence ...\n")
 
 	cfg.one(11, servers)
+	fmt.Printf("here 1")
 
 	// crash and re-start all
 	for i := 0; i < servers; i++ {
@@ -543,6 +544,7 @@ func TestPersist12C(t *testing.T) {
 	}
 
 	cfg.one(12, servers)
+	fmt.Printf("here 2")
 
 	leader1 := cfg.checkOneLeader()
 	cfg.disconnect(leader1)
@@ -550,6 +552,7 @@ func TestPersist12C(t *testing.T) {
 	cfg.connect(leader1)
 
 	cfg.one(13, servers)
+	fmt.Printf("here 3")
 
 	leader2 := cfg.checkOneLeader()
 	cfg.disconnect(leader2)
@@ -566,6 +569,7 @@ func TestPersist12C(t *testing.T) {
 	cfg.connect(i3)
 
 	cfg.one(16, servers)
+	fmt.Printf("here 4")
 
 	fmt.Printf("  ... Passed\n")
 }
@@ -580,6 +584,7 @@ func TestPersist22C(t *testing.T) {
 	index := 1
 	for iters := 0; iters < 5; iters++ {
 		cfg.one(10+index, servers)
+		fmt.Println("here 1, iters:",iters)
 		index++
 
 		leader1 := cfg.checkOneLeader()
@@ -588,6 +593,7 @@ func TestPersist22C(t *testing.T) {
 		cfg.disconnect((leader1 + 2) % servers)
 
 		cfg.one(10+index, servers-2)
+		fmt.Println("here 2, iters:",iters)
 		index++
 
 		cfg.disconnect((leader1 + 0) % servers)
@@ -605,6 +611,7 @@ func TestPersist22C(t *testing.T) {
 		cfg.connect((leader1 + 3) % servers)
 
 		cfg.one(10+index, servers-2)
+		fmt.Println("here 3, iters:",iters)
 		index++
 
 		cfg.connect((leader1 + 4) % servers)
@@ -624,11 +631,13 @@ func TestPersist32C(t *testing.T) {
 	fmt.Printf("Test (2C): partitioned leader and one follower crash, leader restarts ...\n")
 
 	cfg.one(101, 3)
+	fmt.Println("here 1")
 
 	leader := cfg.checkOneLeader()
 	cfg.disconnect((leader + 2) % servers)
 
 	cfg.one(102, 2)
+	fmt.Println("here 2")
 
 	cfg.crash1((leader + 0) % servers)
 	cfg.crash1((leader + 1) % servers)
@@ -637,11 +646,13 @@ func TestPersist32C(t *testing.T) {
 	cfg.connect((leader + 0) % servers)
 
 	cfg.one(103, 2)
+	fmt.Println("here 3")
 
 	cfg.start1((leader + 1) % servers)
 	cfg.connect((leader + 1) % servers)
 
 	cfg.one(104, servers)
+	fmt.Println("here 4")
 
 	fmt.Printf("  ... Passed\n")
 }
