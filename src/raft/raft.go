@@ -257,8 +257,10 @@ type AppendEntriesArgs struct {
 }
 
 type AppendEntriesReply struct {
-	Term    int
-	Success bool
+	Term                      int
+	Success                   bool
+	ConflictingTerm           int
+	FirstIndexConflictingTerm int
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
@@ -284,6 +286,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	// check if the entry at previous index is correct.
 	if args.PrevLogIndex > len(rf.Log)-1 {
+		reply.ConflictingTerm = -1
+		reply.FirstIndexConflictingTerm = len(rf.Log)
+		fmt.Println("MANAV other args:", args.PrevLogIndex, " len: ",len(rf.Log)-1)
 		reply.Term = rf.CurrentTerm
 		reply.Success = false
 		rf.persist()
@@ -293,6 +298,18 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	if args.PrevLogIndex >= 0 {
 		if rf.Log[args.PrevLogIndex].Term != args.PrevLogTerm {
+			reply.ConflictingTerm = rf.Log[args.PrevLogIndex].Term
+			var i int
+			fmt.Println("MANAV ",args.PrevLogIndex)
+			for i = args.PrevLogIndex; i >= -1; i-- {
+				if i < 0 {
+					break
+				}
+				if rf.Log[i].Term != reply.ConflictingTerm {
+					break
+				}
+			}
+			reply.FirstIndexConflictingTerm = i + 1
 			reply.Term = rf.CurrentTerm
 			reply.Success = false
 			rf.persist()
@@ -374,7 +391,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 //
 func (rf *Raft) Kill() {
 	// Your code here, if desired.
-	fmt.Println(rf.Log, "at: ",rf.me)
+	fmt.Println(rf.Log, "at: ", rf.me)
 	//killAllGoRoutines = true
 	//time.Sleep(5 * time.Second)
 }
@@ -444,8 +461,31 @@ func (rf *Raft) startAgreement() {
 					rf.mu.Unlock()
 					return
 				} else {
-					// In this case, the prev entry is not correct, try again by decrementing the nextIndex
-					rf.nextIndex[i]--
+					// If the previous entry is not correct, then
+					// 	- If the receiver log was shorter, set nextIndex to the
+					//	  length of the last receiver log entry. 
+					//	- If there was a mismatch, try to rollback to as many
+					//    entries as possible as an optimization.
+					if reply.ConflictingTerm == -1 {
+						if reply.FirstIndexConflictingTerm < 0 {
+							fmt.Println("WHY HERE")
+							rf.nextIndex[i] = 0
+						} else {
+							rf.nextIndex[i] = reply.FirstIndexConflictingTerm
+						}
+					} else {
+						var j int
+						for j = rf.nextIndex[i] - 1; j >= reply.FirstIndexConflictingTerm-1; j-- {
+							if j < 0 {
+								fmt.Println("WHY HERE")
+								break
+							}
+							if rf.Log[j].Term == reply.ConflictingTerm {
+								break
+							}
+						}
+						rf.nextIndex[i] = j + 1
+					}
 				}
 				rf.mu.Unlock()
 			}
@@ -530,22 +570,22 @@ func (rf *Raft) electLeader() {
 				}(i)
 			}
 			respCount := 1
-			loop:
+		loop:
 			// If the timeout occurs, start the election process again.
 			select {
-				case <-rf.electionTimeout.C:
-					rf.electionTimeout.Reset(time.Millisecond * time.Duration(rf.electionTimeoutVal))
+			case <-rf.electionTimeout.C:
+				rf.electionTimeout.Reset(time.Millisecond * time.Duration(rf.electionTimeoutVal))
+				goto endf
+			case <-out:
+				if shouldBreak {
 					goto endf
-				case <-out:
-					if shouldBreak {
-						goto endf
-					}
-					if (votesRecvd >= ((len(rf.peers) / 2) + 1)) || respCount == len(rf.peers) {
-						break
-					}
-					if respCount < len(rf.peers) {
-						goto loop
-					}
+				}
+				if (votesRecvd >= ((len(rf.peers) / 2) + 1)) || respCount == len(rf.peers) {
+					break
+				}
+				if respCount < len(rf.peers) {
+					goto loop
+				}
 			}
 			// Check if got majority votes, if yes, become leader
 			if votesRecvd >= ((len(rf.peers) / 2) + 1) {
@@ -619,11 +659,28 @@ func (rf *Raft) sendHeartbeat() {
 							rf.mu.Unlock()
 							return
 						} else {
-							// This means that prevLog Index or term didn't match.
-							// Thus decrement the nextIndex. TODO: should we check
-							// recursively also ? Might not be reqd as this is just
-							// a heartbeat.
-							rf.nextIndex[i]--
+							// TODO: should we check recursively also ? Might
+							// not be reqd as this is just a heartbeat.
+							if reply.ConflictingTerm == -1 {
+								if reply.FirstIndexConflictingTerm < 0 {
+									fmt.Println("WHY HERE")
+									rf.nextIndex[i] = 0
+								} else {
+									rf.nextIndex[i] = reply.FirstIndexConflictingTerm
+								}
+							} else {
+								var j int
+								for j = rf.nextIndex[i] - 1; j >= reply.FirstIndexConflictingTerm-1; j-- {
+									if j < 0 {
+									fmt.Println("WHY HERE")
+										break
+									}
+									if rf.Log[j].Term == reply.ConflictingTerm {
+										break
+									}
+								}
+								rf.nextIndex[i] = j + 1
+							}
 						}
 					}
 					rf.mu.Unlock()
@@ -698,7 +755,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
-	fmt.Println("ME: ",rf.me," LOG IS ", rf.Log, " CURRENT TERM IS ",rf.CurrentTerm, " Voted for is:", rf.VotedFor)
+	fmt.Println("ME: ", rf.me, " LOG IS ", rf.Log, " CURRENT TERM IS ", rf.CurrentTerm, " Voted for is:", rf.VotedFor)
 
 	// Initialize the other state values.
 	rf.commitIndex = -1
