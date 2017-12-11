@@ -79,7 +79,7 @@ type Log struct {
 	Term    int
 }
 
-//var killAllGoRoutines bool
+var killAllGoRoutines bool
 
 // return CurrentTerm and whether this server
 // believes it is the leader.
@@ -288,7 +288,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if args.PrevLogIndex > len(rf.Log)-1 {
 		reply.ConflictingTerm = -1
 		reply.FirstIndexConflictingTerm = len(rf.Log)
-		fmt.Println("MANAV other args:", args.PrevLogIndex, " len: ",len(rf.Log)-1)
+		//fmt.Println("MANAV other at: ",rf.me,"from: ", args.LeaderId, "args:", args.PrevLogIndex, " len: ",len(rf.Log)-1)
 		reply.Term = rf.CurrentTerm
 		reply.Success = false
 		rf.persist()
@@ -300,7 +300,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		if rf.Log[args.PrevLogIndex].Term != args.PrevLogTerm {
 			reply.ConflictingTerm = rf.Log[args.PrevLogIndex].Term
 			var i int
-			fmt.Println("MANAV ",args.PrevLogIndex)
+			//fmt.Println("MANAV ",args.PrevLogIndex)
 			for i = args.PrevLogIndex; i >= -1; i-- {
 				if i < 0 {
 					break
@@ -338,6 +338,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		} else {
 			rf.commitIndex = args.LeaderCommit
 		}
+		//fmt.Println("setting commitIndex: ",rf.commitIndex, "at: ", rf.me)
 	}
 
 	reply.Success = true
@@ -391,8 +392,9 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 //
 func (rf *Raft) Kill() {
 	// Your code here, if desired.
-	fmt.Println(rf.Log, "at: ", rf.me)
-	//killAllGoRoutines = true
+	//fmt.Println(rf.Log, "at: ", rf.me)
+	fmt.Println("Kill at: ", rf.me, "log length:", len(rf.Log))
+	killAllGoRoutines = true
 	//time.Sleep(5 * time.Second)
 }
 
@@ -495,9 +497,9 @@ func (rf *Raft) startAgreement() {
 
 func (rf *Raft) electLeader() {
 	for {
-		/*if killAllGoRoutines {
+		if killAllGoRoutines {
 			return
-		}*/
+		}
 		<-rf.electionTimeout.C
 
 		// As the Leader doesn't send heartbeat to itself, if it is leader,
@@ -593,7 +595,7 @@ func (rf *Raft) electLeader() {
 				// start sending heartbeats to others
 				rf.mu.Lock()
 				rf.isLeader = true
-				//fmt.Println("Leader is ",rf.me," term: ",rf.CurrentTerm, " at:",time.Now(), "log: ",rf.Log)
+				//fmt.Println("Leader is ",rf.me," term: ",rf.CurrentTerm, " at:",time.Now())//, "log: ",rf.Log)
 				for i := 0; i < len(rf.peers); i++ {
 					rf.nextIndex[i] = len(rf.Log)
 					rf.matchIndex[i] = 0
@@ -610,9 +612,9 @@ func (rf *Raft) sendHeartbeat() {
 	// TODO: should the leader send heartbeat to itself ? Ideally, should not
 	ticker := time.NewTicker(time.Millisecond * 150)
 	for _ = range ticker.C {
-		/*if killAllGoRoutines {
+		if killAllGoRoutines {
 			return
-		}*/
+		}
 		if rf.isLeader {
 			//fmt.Println("ENTERING HEARTBEAT for ", rf.me)
 			for i := 0; i < len(rf.peers); i++ {
@@ -715,7 +717,7 @@ func (rf *Raft) applyMsg(applyCh chan ApplyMsg) {
 				//fmt.Println("MANAV: majority", majority, " me:", rf.me, " i:", i, " commitindex:", rf.commitIndex)
 				if majority > len(rf.peers)/2 {
 					rf.commitIndex = i
-					//fmt.Println("MANAV: Increasing commit index: ","rf.me: ", rf.me, "rf.commit: ", rf.commitIndex, "rf.log: ",rf.Log)
+					//fmt.Println("MANAV: Increasing commit index: ","rf.me: ", rf.me, "rf.commit: ", rf.commitIndex)//, "rf.log: ",rf.Log)
 					break
 				}
 			}
@@ -723,6 +725,7 @@ func (rf *Raft) applyMsg(applyCh chan ApplyMsg) {
 		}
 
 		//fmt.Println("Total Log: %v, rf.me: \n", rf.Log, rf.me)
+		again:
 		if rf.commitIndex > rf.lastApplied {
 			rf.mu.Lock()
 			rf.lastApplied++
@@ -731,6 +734,7 @@ func (rf *Raft) applyMsg(applyCh chan ApplyMsg) {
 				Command: rf.Log[rf.lastApplied].Command}
 			rf.mu.Unlock()
 			applyCh <- arg
+			goto again
 		}
 	}
 }
@@ -755,7 +759,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
-	fmt.Println("ME: ", rf.me, " LOG IS ", rf.Log, " CURRENT TERM IS ", rf.CurrentTerm, " Voted for is:", rf.VotedFor)
+	fmt.Println("ME: ", rf.me, " CURRENT TERM IS ", rf.CurrentTerm, " Voted for is:", rf.VotedFor)
+	// fmt.Println("ME: ", rf.me, " LOG IS ", rf.Log, " CURRENT TERM IS ", rf.CurrentTerm, " Voted for is:", rf.VotedFor)
 
 	// Initialize the other state values.
 	rf.commitIndex = -1
@@ -773,7 +778,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	fmt.Println("ELECTION VALUE at ", rf.me, " is:", rf.electionTimeoutVal)
 	rf.electionTimeout = time.NewTimer(time.Millisecond * time.Duration(rf.electionTimeoutVal))
 
-	//killAllGoRoutines = false
+	killAllGoRoutines = false
 	go rf.sendHeartbeat()
 	go rf.electLeader()
 	go rf.applyMsg(applyCh)
