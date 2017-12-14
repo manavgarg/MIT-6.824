@@ -55,15 +55,11 @@ func TestReElection2A(t *testing.T) {
 	fmt.Println("LEADER ",leader1,"DISCONNECTED!!!!!!!!!!!!!!!!!!! at", time.Now())
 	cfg.checkOneLeader()
 
-	fmt.Println("Manav 1")
-
 	// if the old leader rejoins, that shouldn't
 	// disturb the old leader.
 	cfg.connect(leader1)
 	fmt.Println("LEADER ",leader1,"CONNECTED!!!!!!!!!!!!!!!!!!! at", time.Now())
 	leader2 := cfg.checkOneLeader()
-
-	fmt.Println("Manav 2")
 
 	// if there's no quorum, no leader should
 	// be elected.
@@ -73,13 +69,11 @@ func TestReElection2A(t *testing.T) {
 	fmt.Println("LEADER ",(leader2 + 1) % servers,"DISCONNECTED!!!!!!!!!!!!!!!!!!! at", time.Now())
 	time.Sleep(2 * RaftElectionTimeout)
 	cfg.checkNoLeader()
-	fmt.Println("Manav 3")
 
 	// if a quorum arises, it should elect a leader.
 	cfg.connect((leader2 + 1) % servers)
 	fmt.Println("LEADER ",(leader2 + 1) % servers,"CONNECTED!!!!!!!!!!!!!!!!!!! at", time.Now())
 	cfg.checkOneLeader()
-	fmt.Println("Manav 4")
 
 	// re-join of last node shouldn't prevent leader from existing.
 	cfg.connect(leader2)
@@ -350,8 +344,6 @@ func TestBackup2B(t *testing.T) {
 	cfg.disconnect((leader1 + 3) % servers)
 	cfg.disconnect((leader1 + 4) % servers)
 
-	fmt.Println("MANAV 1")
-
 	// submit lots of commands that won't commit
 	for i := 0; i < 50; i++ {
 		cfg.rafts[leader1].Start(rand.Int())
@@ -361,7 +353,6 @@ func TestBackup2B(t *testing.T) {
 
 	cfg.disconnect((leader1 + 0) % servers)
 	cfg.disconnect((leader1 + 1) % servers)
-	fmt.Println("MANAV 2")
 
 	// allow other partition to recover
 	cfg.connect((leader1 + 2) % servers)
@@ -373,7 +364,6 @@ func TestBackup2B(t *testing.T) {
 		cfg.one(rand.Int(), 3)
 	}
 
-	fmt.Println("MANAV 3")
 	// now another partitioned leader and one follower
 	leader2 := cfg.checkOneLeader()
 	other := (leader1 + 2) % servers
@@ -387,7 +377,6 @@ func TestBackup2B(t *testing.T) {
 		cfg.rafts[leader2].Start(rand.Int())
 	}
 
-	fmt.Println("MANAV 4")
 	time.Sleep(RaftElectionTimeout / 2)
 
 	// bring original leader back to life,
@@ -398,12 +387,10 @@ func TestBackup2B(t *testing.T) {
 	cfg.connect((leader1 + 1) % servers)
 	cfg.connect(other)
 
-	fmt.Println("MANAV 5")
 	// lots of successful commands to new group.
 	for i := 0; i < 50; i++ {
 		cfg.one(rand.Int(), 3)
 	}
-	fmt.Println("MANAV 6")
 
 	// now everyone
 	for i := 0; i < servers; i++ {
@@ -532,7 +519,6 @@ func TestPersist12C(t *testing.T) {
 	fmt.Printf("Test (2C): basic persistence ...\n")
 
 	cfg.one(11, servers)
-	fmt.Printf("here 1")
 
 	// crash and re-start all
 	for i := 0; i < servers; i++ {
@@ -544,7 +530,6 @@ func TestPersist12C(t *testing.T) {
 	}
 
 	cfg.one(12, servers)
-	fmt.Printf("here 2")
 
 	leader1 := cfg.checkOneLeader()
 	cfg.disconnect(leader1)
@@ -552,7 +537,6 @@ func TestPersist12C(t *testing.T) {
 	cfg.connect(leader1)
 
 	cfg.one(13, servers)
-	fmt.Printf("here 3")
 
 	leader2 := cfg.checkOneLeader()
 	cfg.disconnect(leader2)
@@ -569,7 +553,6 @@ func TestPersist12C(t *testing.T) {
 	cfg.connect(i3)
 
 	cfg.one(16, servers)
-	fmt.Printf("here 4")
 
 	fmt.Printf("  ... Passed\n")
 }
@@ -584,7 +567,6 @@ func TestPersist22C(t *testing.T) {
 	index := 1
 	for iters := 0; iters < 5; iters++ {
 		cfg.one(10+index, servers)
-		fmt.Println("here 1, iters:",iters)
 		index++
 
 		leader1 := cfg.checkOneLeader()
@@ -593,7 +575,6 @@ func TestPersist22C(t *testing.T) {
 		cfg.disconnect((leader1 + 2) % servers)
 
 		cfg.one(10+index, servers-2)
-		fmt.Println("here 2, iters:",iters)
 		index++
 
 		cfg.disconnect((leader1 + 0) % servers)
@@ -611,7 +592,6 @@ func TestPersist22C(t *testing.T) {
 		cfg.connect((leader1 + 3) % servers)
 
 		cfg.one(10+index, servers-2)
-		fmt.Println("here 3, iters:",iters)
 		index++
 
 		cfg.connect((leader1 + 4) % servers)
@@ -631,13 +611,11 @@ func TestPersist32C(t *testing.T) {
 	fmt.Printf("Test (2C): partitioned leader and one follower crash, leader restarts ...\n")
 
 	cfg.one(101, 3)
-	fmt.Println("here 1")
 
 	leader := cfg.checkOneLeader()
 	cfg.disconnect((leader + 2) % servers)
 
 	cfg.one(102, 2)
-	fmt.Println("here 2")
 
 	cfg.crash1((leader + 0) % servers)
 	cfg.crash1((leader + 1) % servers)
@@ -646,13 +624,11 @@ func TestPersist32C(t *testing.T) {
 	cfg.connect((leader + 0) % servers)
 
 	cfg.one(103, 2)
-	fmt.Println("here 3")
 
 	cfg.start1((leader + 1) % servers)
 	cfg.connect((leader + 1) % servers)
 
 	cfg.one(104, servers)
-	fmt.Println("here 4")
 
 	fmt.Printf("  ... Passed\n")
 }
