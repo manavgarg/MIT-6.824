@@ -72,14 +72,13 @@ type Raft struct {
 	// for itself and not the leader.
 	hasLeader          bool
 	electionTimeoutVal int
+	killAllGoRoutines bool
 }
 
 type Log struct {
 	Command interface{}
 	Term    int
 }
-
-var killAllGoRoutines bool
 
 // return CurrentTerm and whether this server
 // believes it is the leader.
@@ -394,7 +393,7 @@ func (rf *Raft) Kill() {
 	// Your code here, if desired.
 	//fmt.Println(rf.Log, "at: ", rf.me)
 	fmt.Println("Kill at: ", rf.me, "log length:", len(rf.Log))
-	killAllGoRoutines = true
+	rf.killAllGoRoutines = true
 	//time.Sleep(5 * time.Second)
 }
 
@@ -470,7 +469,6 @@ func (rf *Raft) startAgreement() {
 					//    entries as possible as an optimization.
 					if reply.ConflictingTerm == -1 {
 						if reply.FirstIndexConflictingTerm < 0 {
-							fmt.Println("WHY HERE")
 							rf.nextIndex[i] = 0
 						} else {
 							rf.nextIndex[i] = reply.FirstIndexConflictingTerm
@@ -479,7 +477,6 @@ func (rf *Raft) startAgreement() {
 						var j int
 						for j = rf.nextIndex[i] - 1; j >= reply.FirstIndexConflictingTerm-1; j-- {
 							if j < 0 {
-								fmt.Println("WHY HERE")
 								break
 							}
 							if rf.Log[j].Term == reply.ConflictingTerm {
@@ -497,7 +494,7 @@ func (rf *Raft) startAgreement() {
 
 func (rf *Raft) electLeader() {
 	for {
-		if killAllGoRoutines {
+		if rf.killAllGoRoutines {
 			return
 		}
 		<-rf.electionTimeout.C
@@ -612,7 +609,7 @@ func (rf *Raft) sendHeartbeat() {
 	// TODO: should the leader send heartbeat to itself ? Ideally, should not
 	ticker := time.NewTicker(time.Millisecond * 150)
 	for _ = range ticker.C {
-		if killAllGoRoutines {
+		if rf.killAllGoRoutines {
 			return
 		}
 		if rf.isLeader {
@@ -665,7 +662,6 @@ func (rf *Raft) sendHeartbeat() {
 							// not be reqd as this is just a heartbeat.
 							if reply.ConflictingTerm == -1 {
 								if reply.FirstIndexConflictingTerm < 0 {
-									fmt.Println("WHY HERE")
 									rf.nextIndex[i] = 0
 								} else {
 									rf.nextIndex[i] = reply.FirstIndexConflictingTerm
@@ -674,7 +670,6 @@ func (rf *Raft) sendHeartbeat() {
 								var j int
 								for j = rf.nextIndex[i] - 1; j >= reply.FirstIndexConflictingTerm-1; j-- {
 									if j < 0 {
-									fmt.Println("WHY HERE")
 										break
 									}
 									if rf.Log[j].Term == reply.ConflictingTerm {
@@ -695,9 +690,9 @@ func (rf *Raft) sendHeartbeat() {
 func (rf *Raft) applyMsg(applyCh chan ApplyMsg) {
 	ticker := time.NewTicker(time.Millisecond * 100)
 	for _ = range ticker.C {
-		/*if killAllGoRoutines {
+		if rf.killAllGoRoutines {
 			return
-		}*/
+		}
 		// Logic to increment commitIndex at the Leader
 		if rf.isLeader {
 			rf.mu.Lock()
@@ -778,7 +773,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	fmt.Println("ELECTION VALUE at ", rf.me, " is:", rf.electionTimeoutVal)
 	rf.electionTimeout = time.NewTimer(time.Millisecond * time.Duration(rf.electionTimeoutVal))
 
-	killAllGoRoutines = false
+	rf.killAllGoRoutines = false
 	go rf.sendHeartbeat()
 	go rf.electLeader()
 	go rf.applyMsg(applyCh)
@@ -787,7 +782,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 // TODO: (Further Design Improvements till 2B):
 // 0. killAllGoRoutines impacts the persistence tests. The only reason to had them in the first place was to be able to run all the tests sequentially (as otherwise the the spawned goroutines of previous tests would impact later tests). However, this might not be required from the point of view of correctness.
-
 // 1. See if the electionTimeut values can be more streamlined and well defined.
 // 2. See if the requesvote Logic in electLeader can be improved. Can it be done in parallel and not break once the majority is received ?
 // 3. See if we can get away with hasLeaser.
