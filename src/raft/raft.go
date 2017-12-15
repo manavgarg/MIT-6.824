@@ -227,112 +227,6 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs,
 	return ok
 }
 
-type AppendEntriesArgs struct {
-	Term         int
-	LeaderId     int
-	PrevLogIndex int
-	PrevLogTerm  int
-	Entries      []Log
-	LeaderCommit int
-}
-
-type AppendEntriesReply struct {
-	Term                      int
-	Success                   bool
-	ConflictingTerm           int
-	FirstIndexConflictingTerm int
-}
-
-func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
-	rf.mu.Lock()
-	//If current term greater than the one at leader, reply false & return
-	if args.Term < rf.CurrentTerm {
-		reply.Term = rf.CurrentTerm
-		reply.Success = false
-		rf.persist()
-		rf.mu.Unlock()
-		return
-	}
-
-	// Update the state based on the args received
-	rf.isLeader = false
-	if args.Term > rf.CurrentTerm {
-		rf.CurrentTerm = args.Term
-		rf.VotedFor = -1
-	}
-	//fmt.Println("Got Heartbeat from ",args.LeaderId," for", rf.me," term:",
-	// rf.CurrentTerm, " at ",time.Now())
-	rf.electionTimeout.Reset(time.Millisecond * time.Duration(rf.electionTimeoutVal))
-	rf.hasLeader = true
-
-	// check if the entry at previous index is correct.
-	if args.PrevLogIndex > len(rf.Log)-1 {
-		reply.ConflictingTerm = -1
-		reply.FirstIndexConflictingTerm = len(rf.Log)
-		reply.Term = rf.CurrentTerm
-		reply.Success = false
-		rf.persist()
-		rf.mu.Unlock()
-		return
-	}
-
-	if args.PrevLogIndex >= 0 {
-		if rf.Log[args.PrevLogIndex].Term != args.PrevLogTerm {
-			reply.ConflictingTerm = rf.Log[args.PrevLogIndex].Term
-			var i int
-			for i = args.PrevLogIndex; i >= -1; i-- {
-				if i < 0 {
-					break
-				}
-				if rf.Log[i].Term != reply.ConflictingTerm {
-					break
-				}
-			}
-			reply.FirstIndexConflictingTerm = i + 1
-			reply.Term = rf.CurrentTerm
-			reply.Success = false
-			rf.persist()
-			rf.mu.Unlock()
-			return
-		}
-	}
-
-	// check if an existing entry conflicts with the new one and append new
-	// entries not already in the Log.
-	for i := 0; i < len(args.Entries); i++ {
-		if len(rf.Log) > args.PrevLogIndex+1+i {
-			if rf.Log[args.PrevLogIndex+1+i].Term != args.Entries[i].Term {
-				rf.Log = rf.Log[:args.PrevLogIndex+1+i+1]
-			}
-			rf.Log[args.PrevLogIndex+1+i] = args.Entries[i]
-		} else {
-			rf.Log = append(rf.Log, args.Entries[i])
-		}
-	}
-
-	// set commitIndex.
-	if args.LeaderCommit > rf.commitIndex {
-		if args.LeaderCommit > (args.PrevLogIndex + len(args.Entries)) {
-			rf.commitIndex = args.PrevLogIndex + len(args.Entries)
-		} else {
-			rf.commitIndex = args.LeaderCommit
-		}
-		//fmt.Println("setting commitIndex: ",rf.commitIndex, "at: ", rf.me)
-	}
-
-	reply.Success = true
-	reply.Term = rf.CurrentTerm
-	rf.persist()
-	rf.mu.Unlock()
-	return
-}
-
-func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs,
-	reply *AppendEntriesReply) bool {
-	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
-	return ok
-}
-
 func (rf *Raft) electLeader() {
 	for {
 		if rf.killAllGoRoutines {
@@ -452,6 +346,112 @@ func (rf *Raft) electLeader() {
 	fmt.Printf("Exiting checkheartbeat in peer %d\n", rf.me)
 }
 
+type AppendEntriesArgs struct {
+	Term         int
+	LeaderId     int
+	PrevLogIndex int
+	PrevLogTerm  int
+	Entries      []Log
+	LeaderCommit int
+}
+
+type AppendEntriesReply struct {
+	Term                      int
+	Success                   bool
+	ConflictingTerm           int
+	FirstIndexConflictingTerm int
+}
+
+func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	rf.mu.Lock()
+	//If current term greater than the one at leader, reply false & return
+	if args.Term < rf.CurrentTerm {
+		reply.Term = rf.CurrentTerm
+		reply.Success = false
+		rf.persist()
+		rf.mu.Unlock()
+		return
+	}
+
+	// Update the state based on the args received
+	rf.isLeader = false
+	if args.Term > rf.CurrentTerm {
+		rf.CurrentTerm = args.Term
+		rf.VotedFor = -1
+	}
+	//fmt.Println("Got Heartbeat from ",args.LeaderId," for", rf.me," term:",
+	// rf.CurrentTerm, " at ",time.Now())
+	rf.electionTimeout.Reset(time.Millisecond * time.Duration(rf.electionTimeoutVal))
+	rf.hasLeader = true
+
+	// check if the entry at previous index is correct.
+	if args.PrevLogIndex > len(rf.Log)-1 {
+		reply.ConflictingTerm = -1
+		reply.FirstIndexConflictingTerm = len(rf.Log)
+		reply.Term = rf.CurrentTerm
+		reply.Success = false
+		rf.persist()
+		rf.mu.Unlock()
+		return
+	}
+
+	if args.PrevLogIndex >= 0 {
+		if rf.Log[args.PrevLogIndex].Term != args.PrevLogTerm {
+			reply.ConflictingTerm = rf.Log[args.PrevLogIndex].Term
+			var i int
+			for i = args.PrevLogIndex; i >= -1; i-- {
+				if i < 0 {
+					break
+				}
+				if rf.Log[i].Term != reply.ConflictingTerm {
+					break
+				}
+			}
+			reply.FirstIndexConflictingTerm = i + 1
+			reply.Term = rf.CurrentTerm
+			reply.Success = false
+			rf.persist()
+			rf.mu.Unlock()
+			return
+		}
+	}
+
+	// check if an existing entry conflicts with the new one and append new
+	// entries not already in the Log.
+	for i := 0; i < len(args.Entries); i++ {
+		if len(rf.Log) > args.PrevLogIndex+1+i {
+			if rf.Log[args.PrevLogIndex+1+i].Term != args.Entries[i].Term {
+				rf.Log = rf.Log[:args.PrevLogIndex+1+i+1]
+			}
+			rf.Log[args.PrevLogIndex+1+i] = args.Entries[i]
+		} else {
+			rf.Log = append(rf.Log, args.Entries[i])
+		}
+	}
+
+	// set commitIndex.
+	if args.LeaderCommit > rf.commitIndex {
+		if args.LeaderCommit > (args.PrevLogIndex + len(args.Entries)) {
+			rf.commitIndex = args.PrevLogIndex + len(args.Entries)
+		} else {
+			rf.commitIndex = args.LeaderCommit
+		}
+		//fmt.Println("setting commitIndex: ",rf.commitIndex, "at: ", rf.me)
+	}
+
+	reply.Success = true
+	reply.Term = rf.CurrentTerm
+	rf.persist()
+	rf.mu.Unlock()
+	return
+}
+
+func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs,
+	reply *AppendEntriesReply) bool {
+	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
+	return ok
+}
+
 //
 // the service using Raft (e.g. a k/v server) wants to start
 // agreement on the next command to be appended to Raft's Log. if this
@@ -503,6 +503,9 @@ func (rf *Raft) startAgreement() {
 			// Keep on trying indefinitely till the Log entry is replicated on
 			// the node.
 			for {
+				if rf.killAllGoRoutines {
+					return
+				}
 				rf.mu.Lock()
 				if !rf.isLeader {
 					rf.mu.Unlock()
