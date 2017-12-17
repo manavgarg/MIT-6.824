@@ -96,9 +96,11 @@ func (rf *Raft) GetState() (int, bool) {
 func (rf *Raft) persist() {
 	w := new(bytes.Buffer)
 	e := gob.NewEncoder(w)
+	rf.mu.Lock()
 	e.Encode(rf.CurrentTerm)
 	e.Encode(rf.VotedFor)
 	e.Encode(rf.Log)
+	rf.mu.Unlock()
 	data := w.Bytes()
 	rf.persister.SaveRaftState(data)
 }
@@ -107,6 +109,7 @@ func (rf *Raft) persist() {
 // restore previously persisted state.
 //
 func (rf *Raft) readPersist(data []byte) {
+	rf.mu.Lock()
 	r := bytes.NewBuffer(data)
 	d := gob.NewDecoder(r)
 	d.Decode(&rf.CurrentTerm)
@@ -115,8 +118,10 @@ func (rf *Raft) readPersist(data []byte) {
 	if data == nil || len(data) < 1 { // bootstrap without any state?
 		rf.CurrentTerm = 0
 		rf.VotedFor = -1
+		rf.mu.Unlock()
 		return
 	}
+	rf.mu.Unlock()
 }
 
 //
@@ -147,8 +152,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	if args.Term < rf.CurrentTerm {
 		reply.Term = rf.CurrentTerm
 		reply.VoteGranted = false
-		rf.persist()
 		rf.mu.Unlock()
+		rf.persist()
 		return
 	}
 
@@ -188,8 +193,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		reply.Term = rf.CurrentTerm
 		reply.VoteGranted = false
 	}
-	rf.persist()
 	rf.mu.Unlock()
+	rf.persist()
 }
 
 //
@@ -255,10 +260,9 @@ func (rf *Raft) electLeader() {
 				LastLogIndex: myLastLogIndex, LastLogTerm: myLastLogTerm}
 			rf.mu.Unlock()
 
-			votesRecvd := 1
 			//fmt.Printf("In peer: %d, CurrentTerm = %d  at:%v\n", rf.me,
 			// rf.CurrentTerm,time.Now())
-
+			votesRecvd := 1
 			out := make(chan bool, 1)
 			var shouldBreak bool
 			for i := 0; i < len(rf.peers); i++ {
@@ -277,8 +281,10 @@ func (rf *Raft) electLeader() {
 					}
 
 					// To prevent Term Confusion (because of stale rpcs)
+					rf.mu.Lock()
 					if arg.Term != rf.CurrentTerm {
 						shouldBreak = true
+						rf.mu.Unlock()
 						out <- ok
 						return
 					}
@@ -287,23 +293,23 @@ func (rf *Raft) electLeader() {
 						// This means that we got an AppendEntries RPC,
 						// thus should convert to follower
 						shouldBreak = true
+						rf.mu.Unlock()
 						out <- ok
 						return
 					}
 
 					if reply.VoteGranted == false {
-						rf.mu.Lock()
 						if reply.Term > rf.CurrentTerm {
 							rf.CurrentTerm = reply.Term
 							rf.VotedFor = -1
 							shouldBreak = true
 						}
-						rf.mu.Unlock()
 					} else {
 						//fmt.Println("Vote recvd at ",rf.me," from:",i," term:",
 						// rf.CurrentTerm)
 						votesRecvd++
 					}
+					rf.mu.Unlock()
 					out <- ok
 				}(i)
 			}
@@ -368,8 +374,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if args.Term < rf.CurrentTerm {
 		reply.Term = rf.CurrentTerm
 		reply.Success = false
-		rf.persist()
 		rf.mu.Unlock()
+		rf.persist()
 		return
 	}
 
@@ -390,8 +396,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.FirstIndexConflictingTerm = len(rf.Log)
 		reply.Term = rf.CurrentTerm
 		reply.Success = false
-		rf.persist()
 		rf.mu.Unlock()
+		rf.persist()
 		return
 	}
 
@@ -410,8 +416,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			reply.FirstIndexConflictingTerm = i + 1
 			reply.Term = rf.CurrentTerm
 			reply.Success = false
-			rf.persist()
 			rf.mu.Unlock()
+			rf.persist()
 			return
 		}
 	}
@@ -441,8 +447,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	reply.Success = true
 	reply.Term = rf.CurrentTerm
-	rf.persist()
 	rf.mu.Unlock()
+	rf.persist()
 	return
 }
 
@@ -476,8 +482,8 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		rf.mu.Lock()
 		//fmt.Println("start: ", command,"me: ", rf.me, "Log len: ", len(rf.Log))
 		rf.Log = append(rf.Log, Log{Command: command, Term: rf.CurrentTerm})
-		rf.persist()
 		rf.mu.Unlock()
+		rf.persist()
 		go rf.startAgreement()
 	}
 	return index, term, isLeader
@@ -629,8 +635,8 @@ func (rf *Raft) applyMsg(applyCh chan ApplyMsg) {
 			return
 		}
 		// Logic to increment commitIndex at the Leader.
+		rf.mu.Lock()
 		if rf.isLeader {
-			rf.mu.Lock()
 			for i := len(rf.Log) - 1; i > rf.commitIndex; i-- {
 				if rf.Log[i].Term != rf.CurrentTerm {
 					continue
@@ -649,12 +655,9 @@ func (rf *Raft) applyMsg(applyCh chan ApplyMsg) {
 					break
 				}
 			}
-			rf.mu.Unlock()
 		}
 
-	again:
-		if rf.commitIndex > rf.lastApplied {
-			rf.mu.Lock()
+		for rf.commitIndex > rf.lastApplied {
 			rf.lastApplied++
 			//fmt.Println("MANAV test", "rf.me: ",rf.me, " ", "rf.commit: ",
 			// rf.commitIndex, "rf.lastap: ", rf.lastApplied)
@@ -662,8 +665,9 @@ func (rf *Raft) applyMsg(applyCh chan ApplyMsg) {
 				Command: rf.Log[rf.lastApplied].Command}
 			rf.mu.Unlock()
 			applyCh <- arg
-			goto again
+			rf.mu.Lock()
 		}
+		rf.mu.Unlock()
 	}
 }
 
