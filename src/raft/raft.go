@@ -60,13 +60,8 @@ type Raft struct {
 	matchIndex []int
 
 	// Additional state added by me to assist with implementation.
-	electionTimeout *time.Timer
-	isLeader        bool
-	// hasLeader is only required for the edge case: when a node is requesting
-	// votes and it receives an appendEntry with the same term. In such a case,
-	// just checking rf.VotedFor would not be sufficient, as it would have voted
-	// for itself and not the leader.
-	hasLeader          bool
+	electionTimeout    *time.Timer
+	isLeader           bool
 	electionTimeoutVal int
 	killAllGoRoutines  bool
 }
@@ -183,6 +178,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			reply.Term = rf.CurrentTerm
 			reply.VoteGranted = true
 			rf.VotedFor = args.CandidateId
+			//fmt.Println("Voted for: ", rf.VotedFor, " me:", rf.me)
 			rf.electionTimeout.Reset(time.Millisecond *
 				time.Duration(rf.electionTimeoutVal))
 		} else {
@@ -234,18 +230,21 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs,
 
 func (rf *Raft) electLeader() {
 	for {
-		if rf.killAllGoRoutines {
+		<-rf.electionTimeout.C
+	retry:
+		rf.mu.Lock()
+		isLeader := rf.isLeader
+		killAllGoRoutines := rf.killAllGoRoutines
+		rf.mu.Unlock()
+		if killAllGoRoutines {
 			return
 		}
-		<-rf.electionTimeout.C
-
 		// As the Leader doesn't send heartbeat to itself, if it is leader,
 		// we can ignore this
-		if !rf.isLeader {
+		if !isLeader {
 			// Will now become candidate and requestvotes.
 			rf.mu.Lock()
 			rf.CurrentTerm++
-			rf.hasLeader = false
 			rf.VotedFor = rf.me
 
 			rf.electionTimeout.Reset(time.Millisecond *
@@ -263,7 +262,7 @@ func (rf *Raft) electLeader() {
 			//fmt.Printf("In peer: %d, CurrentTerm = %d  at:%v\n", rf.me,
 			// rf.CurrentTerm,time.Now())
 			votesRecvd := 1
-			out := make(chan bool, 1)
+			out := make(chan bool, len(rf.peers))
 			var shouldBreak bool
 			for i := 0; i < len(rf.peers); i++ {
 				if i == rf.me {
@@ -274,8 +273,8 @@ func (rf *Raft) electLeader() {
 
 					ok := rf.sendRequestVote(i, arg, reply)
 					if !ok {
-						//fmt.Println("failed requestvote at ",rf.me," for:",i,"
-						// term:",rf.CurrentTerm, " at:",time.Now())
+						//fmt.Println("failed requestvote at ",rf.me," for:",i,
+						//"term:",rf.CurrentTerm, " at:",time.Now())
 						out <- ok
 						return
 					}
@@ -283,13 +282,14 @@ func (rf *Raft) electLeader() {
 					// To prevent Term Confusion (because of stale rpcs)
 					rf.mu.Lock()
 					if arg.Term != rf.CurrentTerm {
+						//fmt.Println("TERM CONFUSION at ",rf.me," for:",i)
 						shouldBreak = true
 						rf.mu.Unlock()
 						out <- ok
 						return
 					}
 
-					if rf.hasLeader || (rf.VotedFor != rf.me) {
+					if rf.VotedFor != rf.me {
 						// This means that we got an AppendEntries RPC,
 						// thus should convert to follower
 						shouldBreak = true
@@ -313,43 +313,41 @@ func (rf *Raft) electLeader() {
 					out <- ok
 				}(i)
 			}
-			respCount := 1
 		loop:
 			// If the timeout occurs, start the election process again.
 			select {
 			case <-rf.electionTimeout.C:
 				rf.electionTimeout.Reset(time.Millisecond *
 					time.Duration(rf.electionTimeoutVal))
-				goto endf
+				goto retry
 			case <-out:
+				rf.mu.Lock()
 				if shouldBreak {
-					goto endf
-				}
-				if (votesRecvd >= ((len(rf.peers) / 2) + 1)) || respCount == len(rf.peers) {
+					rf.mu.Unlock()
 					break
 				}
-				if respCount < len(rf.peers) {
-					goto loop
-				}
-			}
-			// Check if got majority votes, if yes, become leader
-			if votesRecvd >= ((len(rf.peers) / 2) + 1) {
-				// Received majority votes, can declare myself as leader and
-				// start sending heartbeats to others
-				rf.mu.Lock()
-				rf.isLeader = true
-				//fmt.Println("Leader is ",rf.me," term: ",rf.CurrentTerm,
-				//	" at:",time.Now())//, "log: ",rf.Log)
-				for i := 0; i < len(rf.peers); i++ {
-					rf.nextIndex[i] = len(rf.Log)
-					rf.matchIndex[i] = 0
+				// Check if got majority votes, if yes, become leader
+				if votesRecvd >= ((len(rf.peers) / 2) + 1) {
+					// Received majority votes, can declare myself as leader and
+					// start sending heartbeats to others
+					rf.isLeader = true
+					//fmt.Println("Leader is ",rf.me," term: ",rf.CurrentTerm,
+					//" at:",time.Now())//, "log: ",rf.Log)
+					for i := 0; i < len(rf.peers); i++ {
+						rf.nextIndex[i] = len(rf.Log)
+						rf.matchIndex[i] = 0
+					}
+					rf.mu.Unlock()
+					break
 				}
 				rf.mu.Unlock()
+				goto loop
 			}
+		} else {
+			rf.electionTimeout.Reset(time.Millisecond *
+				time.Duration(rf.electionTimeoutVal))
 		}
-	endf:
 	}
-	fmt.Printf("Exiting checkheartbeat in peer %d\n", rf.me)
 }
 
 type AppendEntriesArgs struct {
@@ -388,7 +386,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	//fmt.Println("Got Heartbeat from ",args.LeaderId," for", rf.me," term:",
 	// rf.CurrentTerm, " at ",time.Now())
 	rf.electionTimeout.Reset(time.Millisecond * time.Duration(rf.electionTimeoutVal))
-	rf.hasLeader = true
 
 	// check if the entry at previous index is correct.
 	if args.PrevLogIndex > len(rf.Log)-1 {
@@ -496,43 +493,22 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 // turn off debug output from this instance.
 //
 func (rf *Raft) Kill() {
-	fmt.Println("Kill at: ", rf.me, "log length:", len(rf.Log))
+	rf.mu.Lock()
+	fmt.Println("Kill at: ", rf.me, "log length:", len(rf.Log)) //, "log: ", rf.Log)
 	rf.killAllGoRoutines = true
+	rf.mu.Unlock()
 }
 
 func (rf *Raft) startAgreement() {
 	for i := 0; i < len(rf.peers); i++ {
-		if i == rf.me {
+		rf.mu.Lock()
+		if i == rf.me || rf.nextIndex[i] >= (len(rf.Log)) {
+			rf.mu.Unlock()
 			continue
 		}
+		rf.mu.Unlock()
 		go func(i int) {
-			// Keep on trying indefinitely till the Log entry is replicated on
-			// the node.
-			for {
-				if rf.killAllGoRoutines {
-					return
-				}
-				rf.mu.Lock()
-				if !rf.isLeader {
-					rf.mu.Unlock()
-					return
-				}
-				if rf.nextIndex[i] >= (len(rf.Log)) {
-					// Entries already upto date at the follower, move on.
-					rf.mu.Unlock()
-					return
-				}
-				rf.mu.Unlock()
-				tryAgain := rf.makeAppendEntriesCall(i)
-				// tryAgain would be false in the following cases:
-				//	- It was a stale RPC, thus there is no point of retry.
-				//	- In case of a Failure scenario when reply.Term > currentTerm.
-				//    Here we should not try again as we should not even remain
-				//	  a leader.
-				if !tryAgain {
-					return
-				}
-			}
+			rf.makeAppendEntriesCall(i)
 		}(i)
 	}
 }
@@ -540,10 +516,14 @@ func (rf *Raft) startAgreement() {
 func (rf *Raft) sendHeartbeat() {
 	ticker := time.NewTicker(time.Millisecond * 150)
 	for _ = range ticker.C {
-		if rf.killAllGoRoutines {
+		rf.mu.Lock()
+		isLeader := rf.isLeader
+		killAllGoRoutines := rf.killAllGoRoutines
+		rf.mu.Unlock()
+		if killAllGoRoutines {
 			return
 		}
-		if rf.isLeader {
+		if isLeader {
 			for i := 0; i < len(rf.peers); i++ {
 				if i == rf.me {
 					continue
@@ -556,12 +536,15 @@ func (rf *Raft) sendHeartbeat() {
 	}
 }
 
-func (rf *Raft) makeAppendEntriesCall(i int) bool {
+func (rf *Raft) makeAppendEntriesCall(i int) {
 	rf.mu.Lock()
+	if !rf.isLeader {
+		rf.mu.Unlock()
+		return
+	}
 
 	prevLogIndex := rf.nextIndex[i] - 1
 	prevLogTerm := 0
-
 	if prevLogIndex >= 0 {
 		prevLogTerm = rf.Log[prevLogIndex].Term
 	}
@@ -576,66 +559,67 @@ func (rf *Raft) makeAppendEntriesCall(i int) bool {
 	ok := rf.sendAppendEntries(i, arg, reply)
 	if !ok {
 		// Node unreachable, continue indefinitely till it is up
-		return true
+		return
 	}
 
 	// Handling stale rpcs
+	rf.mu.Lock()
 	if arg.Term != rf.CurrentTerm {
-		return false
+		rf.mu.Unlock()
+		return
 	}
 
-	rf.mu.Lock()
 	if reply.Success {
 		rf.nextIndex[i] = arg.PrevLogIndex + len(arg.Entries) + 1
 		rf.matchIndex[i] = arg.PrevLogIndex + len(arg.Entries)
 		rf.mu.Unlock()
-		return true
+		return
 	}
 	// Handling the false case.
 	if reply.Term > rf.CurrentTerm {
 		rf.CurrentTerm = reply.Term
 		rf.VotedFor = -1
 		rf.isLeader = false
-		rf.hasLeader = false
 		rf.mu.Unlock()
-		return false
-	} else {
-		// If the previous entry is not correct, then
-		// 	- If the receiver log was shorter, set nextIndex to the
-		//	  length of the last receiver log entry.
-		//	- If there was a mismatch, try to rollback to as many
-		//    entries as possible as an optimization.
-		if reply.ConflictingTerm == -1 {
-			if reply.FirstIndexConflictingTerm < 0 {
-				rf.nextIndex[i] = 0
-			} else {
-				rf.nextIndex[i] = reply.FirstIndexConflictingTerm
-			}
+		return
+	}
+
+	// If the previous entry is not correct, then
+	// 	- If the receiver log was shorter, set nextIndex to the
+	//	  length of the last receiver log entry.
+	//	- If there was a mismatch, try to rollback to as many
+	//    entries as possible as an optimization.
+	if reply.ConflictingTerm == -1 {
+		if reply.FirstIndexConflictingTerm < 0 {
+			rf.nextIndex[i] = 0
 		} else {
-			var j int
-			for j = rf.nextIndex[i] - 1; j >= reply.FirstIndexConflictingTerm-1; j-- {
-				if j < 0 {
-					break
-				}
-				if rf.Log[j].Term == reply.ConflictingTerm {
-					break
-				}
-			}
-			rf.nextIndex[i] = j + 1
+			rf.nextIndex[i] = reply.FirstIndexConflictingTerm
 		}
+	} else {
+		var j int
+		for j = rf.nextIndex[i] - 1; j >= reply.FirstIndexConflictingTerm-1; j-- {
+			if j < 0 {
+				break
+			}
+			if rf.Log[j].Term == reply.ConflictingTerm {
+				break
+			}
+		}
+		rf.nextIndex[i] = j + 1
 	}
 	rf.mu.Unlock()
-	return true
+	return
 }
 
 func (rf *Raft) applyMsg(applyCh chan ApplyMsg) {
 	ticker := time.NewTicker(time.Millisecond * 100)
 	for _ = range ticker.C {
+		rf.mu.Lock()
 		if rf.killAllGoRoutines {
+			rf.mu.Unlock()
 			return
 		}
 		// Logic to increment commitIndex at the Leader.
-		rf.mu.Lock()
 		if rf.isLeader {
 			for i := len(rf.Log) - 1; i > rf.commitIndex; i-- {
 				if rf.Log[i].Term != rf.CurrentTerm {
@@ -700,7 +684,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.nextIndex = make([]int, len(rf.peers))
 	rf.matchIndex = make([]int, len(rf.peers))
 	rf.isLeader = false
-	rf.hasLeader = false
 
 	// Heartbeat to be sent every 150 ms (since no more than 10 per second)
 	// Thus, eleaction timout should be randomly chosen each time between
