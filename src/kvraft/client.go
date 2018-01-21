@@ -3,11 +3,12 @@ package raftkv
 import "labrpc"
 import "crypto/rand"
 import "math/big"
-
+import "fmt"
 
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// You will have to modify this struct.
+	lastLeader int64
 }
 
 func nrand() int64 {
@@ -18,9 +19,11 @@ func nrand() int64 {
 }
 
 func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
+	fmt.Println("MAKE CLIENT")
 	ck := new(Clerk)
 	ck.servers = servers
 	// You'll have to add code here.
+	ck.lastLeader = nrand() % int64(len(ck.servers))
 	return ck
 }
 
@@ -37,9 +40,27 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 // arguments. and reply must be passed as a pointer.
 //
 func (ck *Clerk) Get(key string) string {
-
-	// You will have to modify this function.
-	return ""
+	//fmt.Println("GET: ", key)
+	for {
+		args := GetArgs{Key: key}
+		reply := GetReply{}
+		ok := ck.servers[ck.lastLeader].Call("RaftKV.Get", &args, &reply)
+		if !ok {
+			//fmt.Println("WHY HERE 1")
+			ck.lastLeader = nrand() % int64(len(ck.servers))
+			continue
+		}
+		if reply.Err == OK {
+			//fmt.Println("Done GET: ", key)
+			return reply.Value
+		}
+		if reply.Err == ErrNoKey {
+			//fmt.Println("Done GET: ", key)
+			return ""
+		}
+		//fmt.Println("WHY HERE 2")
+		ck.lastLeader = nrand() % int64(len(ck.servers))
+	}
 }
 
 //
@@ -53,7 +74,22 @@ func (ck *Clerk) Get(key string) string {
 // arguments. and reply must be passed as a pointer.
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
-	// You will have to modify this function.
+	fmt.Println(op, ": k:", key, " v:", value)
+	for {
+		args := PutAppendArgs{Key: key, Value: value, Op: op}
+		reply := PutAppendReply{}
+		ok := ck.servers[ck.lastLeader].Call("RaftKV.PutAppend", &args, &reply)
+		if !ok {
+			fmt.Println("WHY HERE")
+			ck.lastLeader = nrand() % int64(len(ck.servers))
+			continue
+		}
+		if reply.Err == OK {
+			//fmt.Println("DONE ",op,": k:",key," v:", value)
+			return
+		}
+		ck.lastLeader = nrand() % int64(len(ck.servers))
+	}
 }
 
 func (ck *Clerk) Put(key string, value string) {
