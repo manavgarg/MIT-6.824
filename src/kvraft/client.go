@@ -4,11 +4,15 @@ import "labrpc"
 import "crypto/rand"
 import "math/big"
 import "fmt"
+import "sync"
 
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// You will have to modify this struct.
 	lastLeader int64
+	clientId   int64
+	requestNo  int64
+	mu         sync.Mutex
 }
 
 func nrand() int64 {
@@ -24,6 +28,8 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck.servers = servers
 	// You'll have to add code here.
 	ck.lastLeader = nrand() % int64(len(ck.servers))
+	ck.clientId = nrand()
+	ck.requestNo = -1
 	return ck
 }
 
@@ -40,10 +46,13 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 // arguments. and reply must be passed as a pointer.
 //
 func (ck *Clerk) Get(key string) string {
+	ck.mu.Lock()
+	ck.requestNo++
+	args := GetArgs{Key: key, ClientId: ck.clientId, RequestNo: ck.requestNo}
+	ck.mu.Unlock()
 	//fmt.Println("GET: ", key)
+	reply := GetReply{}
 	for {
-		args := GetArgs{Key: key}
-		reply := GetReply{}
 		ok := ck.servers[ck.lastLeader].Call("RaftKV.Get", &args, &reply)
 		if !ok {
 			//fmt.Println("WHY HERE 1")
@@ -74,18 +83,22 @@ func (ck *Clerk) Get(key string) string {
 // arguments. and reply must be passed as a pointer.
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
+	ck.mu.Lock()
+	ck.requestNo++
+	args := PutAppendArgs{Key: key, Value: value, Op: op,
+		ClientId: ck.clientId, RequestNo: ck.requestNo}
+	ck.mu.Unlock()
 	fmt.Println(op, ": k:", key, " v:", value)
+	reply := PutAppendReply{}
 	for {
-		args := PutAppendArgs{Key: key, Value: value, Op: op}
-		reply := PutAppendReply{}
 		ok := ck.servers[ck.lastLeader].Call("RaftKV.PutAppend", &args, &reply)
 		if !ok {
-			fmt.Println("WHY HERE")
+			//fmt.Println("WHY HERE")
 			ck.lastLeader = nrand() % int64(len(ck.servers))
 			continue
 		}
 		if reply.Err == OK {
-			//fmt.Println("DONE ",op,": k:",key," v:", value)
+			fmt.Println("DONE ", op, ": k:", key, " v:", value)
 			return
 		}
 		ck.lastLeader = nrand() % int64(len(ck.servers))

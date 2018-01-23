@@ -23,10 +23,12 @@ type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
-	Key   string
-	Value string
-	Op    string
-	Err   Err
+	Key       string
+	Value     string
+	Op        string
+	Err       Err
+	ClientId  int64
+	RequestNo int64
 }
 
 type RaftKV struct {
@@ -38,9 +40,10 @@ type RaftKV struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
-	getChannelMap map[string]chan raft.ApplyMsg
-	putChannelMap map[string]chan raft.ApplyMsg
-	kvStore       map[string]string
+	getChannelMap        map[string]chan raft.ApplyMsg
+	putChannelMap        map[string]chan raft.ApplyMsg
+	kvStore              map[string]string
+	clientLastRequestMap map[int64]Op
 }
 
 func (kv *RaftKV) listenApplyCh() {
@@ -56,6 +59,7 @@ func (kv *RaftKV) listenApplyCh() {
 			}
 			res.Command = command
 			kv.mu.Lock()
+			kv.clientLastRequestMap[command.ClientId] = command
 			writeChan, ok := kv.getChannelMap[command.Key]
 			kv.mu.Unlock()
 			if !ok {
@@ -75,6 +79,7 @@ func (kv *RaftKV) listenApplyCh() {
 			command.Err = OK
 			res.Command = command
 			kv.mu.Lock()
+			kv.clientLastRequestMap[command.ClientId] = command
 			writeChan, ok := kv.putChannelMap[command.Key]
 			kv.mu.Unlock()
 			if !ok {
@@ -89,11 +94,27 @@ func (kv *RaftKV) listenApplyCh() {
 
 func (kv *RaftKV) Get(args *GetArgs, reply *GetReply) {
 	kv.mu.Lock()
+	// Handling duplicate requests (i.e committed requests should not be tried
+	// again). However, it does not protect against the case in which the client
+	// retries too soon again before actually the entry is committed.
+	val, ok := kv.clientLastRequestMap[args.ClientId]
+	// TODO: should this be equality check for only the last entry ?
+	if ok && val.RequestNo == args.RequestNo {
+		// This is a duplicate request, ignore it.
+		// TODO :How do we handle the reply ?
+		reply.WrongLeader = false
+		reply.Err = val.Err
+		reply.Value = val.Value
+		kv.mu.Unlock()
+		return
+	}
+
 	// TODO: see if the keys to this map can be something else,
 	kv.getChannelMap[args.Key] = make(chan raft.ApplyMsg)
 	readChan := kv.getChannelMap[args.Key]
 	kv.mu.Unlock()
-	_, _, isLeader := kv.rf.Start(Op{Key: args.Key, Op: "Get"})
+	_, _, isLeader := kv.rf.Start(Op{Key: args.Key, Op: "Get",
+		ClientId: args.ClientId, RequestNo: args.RequestNo})
 	if !isLeader {
 		reply.WrongLeader = true
 		reply.Err = "WrongLeader"
@@ -122,11 +143,26 @@ func (kv *RaftKV) Get(args *GetArgs, reply *GetReply) {
 
 func (kv *RaftKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	kv.mu.Lock()
+	// Handling duplicate requests (i.e committed requests should not be tried
+	// again). However, it does not protect against the case in which the client
+	// retries too soon again before actually the entry is committed.
+	val, ok := kv.clientLastRequestMap[args.ClientId]
+	// TODO: should this be equality check for only the last entry ?
+	if ok && val.RequestNo == args.RequestNo {
+		// This is a duplicate request, ignore it.
+		// TODO :How do we handle the reply ?
+		reply.WrongLeader = false
+		reply.Err = val.Err
+		kv.mu.Unlock()
+		return
+	}
+
 	// TODO: see if the keys to this map can be something else,
 	kv.putChannelMap[args.Key] = make(chan raft.ApplyMsg)
 	readChan := kv.putChannelMap[args.Key]
 	kv.mu.Unlock()
-	_, _, isLeader := kv.rf.Start(Op{Key: args.Key, Value: args.Value, Op: args.Op})
+	_, _, isLeader := kv.rf.Start(Op{Key: args.Key, Value: args.Value, Op: args.Op,
+		ClientId: args.ClientId, RequestNo: args.RequestNo})
 	if !isLeader {
 		reply.WrongLeader = true
 		reply.Err = "WrongLeader"
@@ -191,6 +227,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.kvStore = make(map[string]string)
 	kv.getChannelMap = make(map[string]chan raft.ApplyMsg)
 	kv.putChannelMap = make(map[string]chan raft.ApplyMsg)
+	kv.clientLastRequestMap = make(map[int64]Op)
 
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
