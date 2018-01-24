@@ -40,8 +40,7 @@ type RaftKV struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
-	getChannelMap        map[string]chan raft.ApplyMsg
-	putChannelMap        map[string]chan raft.ApplyMsg
+	channelMap			 map[int64]chan raft.ApplyMsg
 	kvStore              map[string]string
 	clientLastRequestMap map[int64]Op
 }
@@ -57,17 +56,6 @@ func (kv *RaftKV) listenApplyCh() {
 			} else {
 				command.Err = ErrNoKey
 			}
-			res.Command = command
-			kv.mu.Lock()
-			kv.clientLastRequestMap[command.ClientId] = command
-			writeChan, ok := kv.getChannelMap[command.Key]
-			kv.mu.Unlock()
-			if !ok {
-				// This means that this is not a leader and thus it cannot/doesnot
-				// need to write to channel as no client is waiting.
-				continue
-			}
-			writeChan <- res
 		} else {
 			if command.Op == "Put" {
 				//fmt.Println("me: ",kv.me,"Applied Put: ",command.Key,command.Value)
@@ -77,18 +65,18 @@ func (kv *RaftKV) listenApplyCh() {
 				kv.kvStore[command.Key] += command.Value
 			}
 			command.Err = OK
-			res.Command = command
-			kv.mu.Lock()
-			kv.clientLastRequestMap[command.ClientId] = command
-			writeChan, ok := kv.putChannelMap[command.Key]
-			kv.mu.Unlock()
-			if !ok {
-				// This means that this is not a leader and thus it cannot/doesnot
-				// need to write to channel as no client is waiting.
-				continue
-			}
-			writeChan <- res
 		}
+		res.Command = command
+		kv.mu.Lock()
+		kv.clientLastRequestMap[command.ClientId] = command
+		writeChan, ok := kv.channelMap[command.ClientId]
+		kv.mu.Unlock()
+		if !ok {
+			// This means that this is not a leader and thus it cannot/doesnot
+			// need to write to channel as no client is waiting.
+			continue
+		}
+		writeChan <- res
 	}
 }
 
@@ -102,6 +90,7 @@ func (kv *RaftKV) Get(args *GetArgs, reply *GetReply) {
 	if ok && val.RequestNo == args.RequestNo {
 		// This is a duplicate request, ignore it.
 		// TODO :How do we handle the reply ?
+		fmt.Println("DUPLICATE REQUEST ", args)
 		reply.WrongLeader = false
 		reply.Err = val.Err
 		reply.Value = val.Value
@@ -110,8 +99,8 @@ func (kv *RaftKV) Get(args *GetArgs, reply *GetReply) {
 	}
 
 	// TODO: see if the keys to this map can be something else,
-	kv.getChannelMap[args.Key] = make(chan raft.ApplyMsg)
-	readChan := kv.getChannelMap[args.Key]
+	kv.channelMap[args.ClientId] = make(chan raft.ApplyMsg)
+	readChan := kv.channelMap[args.ClientId]
 	kv.mu.Unlock()
 	_, _, isLeader := kv.rf.Start(Op{Key: args.Key, Op: "Get",
 		ClientId: args.ClientId, RequestNo: args.RequestNo})
@@ -119,14 +108,16 @@ func (kv *RaftKV) Get(args *GetArgs, reply *GetReply) {
 		reply.WrongLeader = true
 		reply.Err = "WrongLeader"
 		kv.mu.Lock()
-		delete(kv.getChannelMap, args.Key)
+		delete(kv.channelMap, args.ClientId)
 		kv.mu.Unlock()
 		return
 	}
 
+	fmt.Println("BEFORE SERVER: ",args)
 	res := <-readChan
+	fmt.Println("AFTER SERVER: ",res)
 	kv.mu.Lock()
-	delete(kv.getChannelMap, args.Key)
+	delete(kv.channelMap, args.ClientId)
 	kv.mu.Unlock()
 	// TODO: improve the logic to check if leadership lost before commit.
 	// TODO: check this, need to change this to uniquely determine an entry at an index.
@@ -151,6 +142,7 @@ func (kv *RaftKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	if ok && val.RequestNo == args.RequestNo {
 		// This is a duplicate request, ignore it.
 		// TODO :How do we handle the reply ?
+		fmt.Println("DUPLICATE REQUEST ", args)
 		reply.WrongLeader = false
 		reply.Err = val.Err
 		kv.mu.Unlock()
@@ -158,8 +150,8 @@ func (kv *RaftKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	}
 
 	// TODO: see if the keys to this map can be something else,
-	kv.putChannelMap[args.Key] = make(chan raft.ApplyMsg)
-	readChan := kv.putChannelMap[args.Key]
+	kv.channelMap[args.ClientId] = make(chan raft.ApplyMsg)
+	readChan := kv.channelMap[args.ClientId]
 	kv.mu.Unlock()
 	_, _, isLeader := kv.rf.Start(Op{Key: args.Key, Value: args.Value, Op: args.Op,
 		ClientId: args.ClientId, RequestNo: args.RequestNo})
@@ -167,14 +159,16 @@ func (kv *RaftKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		reply.WrongLeader = true
 		reply.Err = "WrongLeader"
 		kv.mu.Lock()
-		delete(kv.putChannelMap, args.Key)
+		delete(kv.channelMap, args.ClientId)
 		kv.mu.Unlock()
 		return
 	}
 
+	fmt.Println("BEFORE SERVER: ",args)
 	res := <-readChan
+	fmt.Println("AFTER SERVER: ",res)
 	kv.mu.Lock()
-	delete(kv.putChannelMap, args.Key)
+	delete(kv.channelMap, args.ClientId)
 	kv.mu.Unlock()
 	// TODO: improve the logic to check if leadership lost before commit.
 	// TODO: check this, need to change this to uniquely determine an entry at an index.
@@ -225,8 +219,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	// You may need initialization code here.
 	kv.kvStore = make(map[string]string)
-	kv.getChannelMap = make(map[string]chan raft.ApplyMsg)
-	kv.putChannelMap = make(map[string]chan raft.ApplyMsg)
+	kv.channelMap = make(map[int64]chan raft.ApplyMsg)
 	kv.clientLastRequestMap = make(map[int64]Op)
 
 	kv.applyCh = make(chan raft.ApplyMsg)

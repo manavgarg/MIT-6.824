@@ -50,7 +50,7 @@ func (ck *Clerk) Get(key string) string {
 	ck.requestNo++
 	args := GetArgs{Key: key, ClientId: ck.clientId, RequestNo: ck.requestNo}
 	ck.mu.Unlock()
-	//fmt.Println("GET: ", key)
+	fmt.Println("Clerk: ", ck.clientId, "GET: ", key)
 	reply := GetReply{}
 	for {
 		ok := ck.servers[ck.lastLeader].Call("RaftKV.Get", &args, &reply)
@@ -88,9 +88,10 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	args := PutAppendArgs{Key: key, Value: value, Op: op,
 		ClientId: ck.clientId, RequestNo: ck.requestNo}
 	ck.mu.Unlock()
-	fmt.Println(op, ": k:", key, " v:", value)
+	//fmt.Println("Clerk: ", ck.clientId, op, ": k:", key, " v:", value)
 	reply := PutAppendReply{}
 	for {
+		fmt.Println("Clerk: ", ck.clientId, op, ": k:", key, " v:", value)
 		ok := ck.servers[ck.lastLeader].Call("RaftKV.PutAppend", &args, &reply)
 		if !ok {
 			//fmt.Println("WHY HERE")
