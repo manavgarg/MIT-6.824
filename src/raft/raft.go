@@ -344,8 +344,10 @@ func (rf *Raft) electLeader() {
 				goto loop
 			}
 		} else {
+			rf.mu.Lock()
 			rf.electionTimeout.Reset(time.Millisecond *
 				time.Duration(rf.electionTimeoutVal))
+			rf.mu.Unlock()
 		}
 	}
 }
@@ -478,6 +480,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		// Start the agreement now for this entry.
 		rf.mu.Lock()
 		//fmt.Println("start: ", command,"me: ", rf.me, "Log len: ", len(rf.Log))
+		index = len(rf.Log) + 1
 		rf.Log = append(rf.Log, Log{Command: command, Term: rf.CurrentTerm})
 		rf.mu.Unlock()
 		rf.persist()
@@ -675,8 +678,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// Initialize from state persisted before a crash.
 	rf.readPersist(persister.ReadRaftState())
-	fmt.Println("ME: ", rf.me, " CURRENT TERM IS ", rf.CurrentTerm,
-		" Voted for is:", rf.VotedFor)
+	//fmt.Println("ME: ", rf.me, " CURRENT TERM IS ", rf.CurrentTerm,
+	//	" Voted for is:", rf.VotedFor)
 
 	// Initialize the other state values.
 	rf.commitIndex = -1
@@ -690,7 +693,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// (200-900 ms); need to elect a leader within 5 secs.
 	rand.Seed(int64(rf.me*100000 + 10000))
 	rf.electionTimeoutVal = 200 + rand.Intn(700)
-	fmt.Println("ELECTION VALUE at ", rf.me, " is:", rf.electionTimeoutVal)
+	// fmt.Println("ELECTION VALUE at ", rf.me, " is:", rf.electionTimeoutVal)
 	rf.electionTimeout = time.NewTimer(time.Millisecond *
 		time.Duration(rf.electionTimeoutVal))
 

@@ -50,7 +50,7 @@ func (ck *Clerk) Get(key string) string {
 	ck.requestNo++
 	args := GetArgs{Key: key, ClientId: ck.clientId, RequestNo: ck.requestNo}
 	ck.mu.Unlock()
-	fmt.Println("Clerk: ", ck.clientId, "GET: ", key)
+	//fmt.Println("Clerk: ", ck.clientId, "GET: ", key)
 	reply := GetReply{}
 	for {
 		ok := ck.servers[ck.lastLeader].Call("RaftKV.Get", &args, &reply)
@@ -60,14 +60,13 @@ func (ck *Clerk) Get(key string) string {
 			continue
 		}
 		if reply.Err == OK {
-			//fmt.Println("Done GET: ", key)
+			//fmt.Println("Done GET: ", ck.clientId, key)
 			return reply.Value
 		}
 		if reply.Err == ErrNoKey {
-			//fmt.Println("Done GET: ", key)
+			//fmt.Println("Done GET: ", ck.clientId, key)
 			return ""
 		}
-		//fmt.Println("WHY HERE 2")
 		ck.lastLeader = nrand() % int64(len(ck.servers))
 	}
 }
@@ -91,15 +90,14 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	//fmt.Println("Clerk: ", ck.clientId, op, ": k:", key, " v:", value)
 	reply := PutAppendReply{}
 	for {
-		fmt.Println("Clerk: ", ck.clientId, op, ": k:", key, " v:", value)
+		//fmt.Println("In: ", ck.clientId, op, ": k:", key, " v:", value)
 		ok := ck.servers[ck.lastLeader].Call("RaftKV.PutAppend", &args, &reply)
 		if !ok {
-			//fmt.Println("WHY HERE")
 			ck.lastLeader = nrand() % int64(len(ck.servers))
 			continue
 		}
 		if reply.Err == OK {
-			fmt.Println("DONE ", op, ": k:", key, " v:", value)
+			//fmt.Println("DONE ", ck.clientId, op,  ": k:", key, " v:", value)
 			return
 		}
 		ck.lastLeader = nrand() % int64(len(ck.servers))
