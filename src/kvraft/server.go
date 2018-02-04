@@ -7,6 +7,7 @@ import (
 	"log"
 	"raft"
 	"sync"
+	"time"
 )
 
 const Debug = 0
@@ -30,9 +31,9 @@ type Op struct {
 }
 
 type channelMapVal struct {
-	retChan	chan Op
-	index	int
-	isDeleted	bool
+	retChan   chan Op
+	index     int
+	isDeleted bool
 }
 
 type RaftKV struct {
@@ -43,16 +44,14 @@ type RaftKV struct {
 
 	maxraftstate int // snapshot if log grows this big
 
-	channelMap			 map[int64]*channelMapVal
+	channelMap           map[int64]*channelMapVal
 	kvStore              map[string]string
 	clientLastRequestMap map[int64]Op
 }
 
 func (kv *RaftKV) listenApplyCh() {
 	for {
-		//fmt.Println("res me:", kv.me)
 		res := <-kv.applyCh
-		//fmt.Println("res done me:", kv.me,  " i:", res.Index, "cmd: ", res.Command)
 		command := res.Command.(Op)
 		if command.Op == "Get" {
 			if val, ok := kv.kvStore[command.Key]; ok {
@@ -63,11 +62,22 @@ func (kv *RaftKV) listenApplyCh() {
 			}
 		} else {
 			if command.Op == "Put" {
-				//fmt.Println("me: ",kv.me,"Applied Put: ",command.Key,command.Value)
-				kv.kvStore[command.Key] = command.Value
+				// This check here and in the else case is required when raft
+				// leader is able to replicate entries but then looses leadership
+				// (term changes). The next leader will not commit entries from
+				// old term (even if replicated). Thus, the client would be
+				// waiting and eventually retry. Now, when this duplicated
+				// request is committed, the original is also committed. Thus,
+				// we will see the same entry applied twice (Get is idempotent).
+				val, ok := kv.clientLastRequestMap[command.ClientId]
+				if !ok || val.RequestNo != command.RequestNo {
+					kv.kvStore[command.Key] = command.Value
+				}
 			} else {
-				//fmt.Println("me: ",kv.me,"Applied Append: ",command.Key,command.Value)
-				kv.kvStore[command.Key] += command.Value
+				val, ok := kv.clientLastRequestMap[command.ClientId]
+				if !ok || val.RequestNo != command.RequestNo {
+					kv.kvStore[command.Key] += command.Value
+				}
 			}
 			command.Err = OK
 		}
@@ -82,7 +92,6 @@ func (kv *RaftKV) listenApplyCh() {
 		}
 		kv.mu.Unlock()
 
-		//fmt.Println("me:", kv.me, "Manav cmd before:",  command.ClientId, "index:",res.Index ,"Op",command.Op,"key:",command.Key)
 		for k, v := range tempMap {
 			kv.mu.Lock()
 			index := v.index
@@ -93,13 +102,11 @@ func (kv *RaftKV) listenApplyCh() {
 				v.isDeleted = true
 				kv.mu.Unlock()
 				if res.Index == index {
-					//fmt.Println("HERE be","client:",k, " rI:",res.Index, " VI:",v.index, " key:", command.Key)
 					writeChan <- command
-					//fmt.Println("HERE af",   "client:",k, " rI:",res.Index, " VI:",v.index, " key:", command.Key)
 				}
 				continue
 			}
-			if res.Index >= index  && index != -1{
+			if res.Index >= index && index != -1 {
 				kv.mu.Lock()
 				writeChan := v.retChan
 				isDeleted := v.isDeleted
@@ -108,9 +115,7 @@ func (kv *RaftKV) listenApplyCh() {
 					kv.mu.Lock()
 					v.isDeleted = true
 					kv.mu.Unlock()
-					//fmt.Println("me:", kv.me, "MANAV before, len:", "client:",k, " rI:",res.Index, " VI:",v.index, " key:", command.Key)
 					writeChan <- Op{}
-					//fmt.Println("me:", kv.me, "MANAV after",  "client:",k, " rI:",res.Index, " VI:",v.index, " key:", command.Key)
 				}
 			}
 		}
@@ -124,11 +129,8 @@ func (kv *RaftKV) Get(args *GetArgs, reply *GetReply) {
 	// retries too soon again before actually the entry is committed (which is
 	// okay as one client only makes on request at a time).
 	val, ok := kv.clientLastRequestMap[args.ClientId]
-	// TODO: should this be equality check for only the last entry ?
 	if ok && val.RequestNo == args.RequestNo {
 		// This is a duplicate request, ignore it.
-		// TODO :How do we handle the reply ?
-		//fmt.Println("DUPLICATE REQUEST ", args)
 		reply.WrongLeader = false
 		reply.Err = val.Err
 		reply.Value = val.Value
@@ -136,11 +138,11 @@ func (kv *RaftKV) Get(args *GetArgs, reply *GetReply) {
 		return
 	}
 
-	// TODO: see if the keys to this map can be something else,
-	kv.channelMap[args.ClientId] = &channelMapVal{retChan: make(chan Op), index:-1, isDeleted:false}
+	kv.channelMap[args.ClientId] = &channelMapVal{retChan: make(chan Op),
+		index: -1, isDeleted: false}
 	readChan := kv.channelMap[args.ClientId].retChan
 	kv.mu.Unlock()
-	index, _, isLeader := kv.rf.Start(Op{Key: args.Key, Op: "Get",
+	index, term, isLeader := kv.rf.Start(Op{Key: args.Key, Op: "Get",
 		ClientId: args.ClientId, RequestNo: args.RequestNo})
 	if !isLeader {
 		reply.WrongLeader = true
@@ -152,11 +154,20 @@ func (kv *RaftKV) Get(args *GetArgs, reply *GetReply) {
 
 	kv.mu.Lock()
 	kv.channelMap[args.ClientId].index = index
-	//fmt.Println("SGET ",   "client:",args.ClientId, " index:",index, "key", args.Key)
 	kv.mu.Unlock()
-	res := <-readChan
+	var res Op
+tryAgain:
+	select {
+	case res = <-readChan:
+	case <-time.After(time.Second * 5):
+		newTerm, isLeader := kv.rf.GetState()
+		if newTerm != term || !isLeader {
+			res = Op{}
+		} else {
+			goto tryAgain
+		}
+	}
 	kv.mu.Lock()
-	//fmt.Println("DEL GET ",   "client:",args.ClientId, " index:",index, "key", args.Key)
 	delete(kv.channelMap, args.ClientId)
 	kv.mu.Unlock()
 
@@ -172,23 +183,20 @@ func (kv *RaftKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// retries too soon again before actually the entry is committed (which is
 	// okay as one client only makes on request at a time).
 	val, ok := kv.clientLastRequestMap[args.ClientId]
-	// TODO: should this be equality check for only the last entry ?
 	if ok && val.RequestNo == args.RequestNo {
 		// This is a duplicate request, ignore it.
-		// TODO :How do we handle the reply ?
-		//fmt.Println("DUPLICATE REQUEST ", args)
 		reply.WrongLeader = false
 		reply.Err = val.Err
 		kv.mu.Unlock()
 		return
 	}
 
-	// TODO: see if the keys to this map can be something else,
-	kv.channelMap[args.ClientId] = &channelMapVal{retChan: make(chan Op), index:-1 ,isDeleted:false}
+	kv.channelMap[args.ClientId] = &channelMapVal{retChan: make(chan Op),
+		index: -1, isDeleted: false}
 	readChan := kv.channelMap[args.ClientId].retChan
 	kv.mu.Unlock()
-	index, _, isLeader := kv.rf.Start(Op{Key: args.Key, Value: args.Value, Op: args.Op,
-		ClientId: args.ClientId, RequestNo: args.RequestNo})
+	index, term, isLeader := kv.rf.Start(Op{Key: args.Key, Value: args.Value,
+		Op: args.Op, ClientId: args.ClientId, RequestNo: args.RequestNo})
 	if !isLeader {
 		reply.WrongLeader = true
 		kv.mu.Lock()
@@ -199,11 +207,20 @@ func (kv *RaftKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 
 	kv.mu.Lock()
 	kv.channelMap[args.ClientId].index = index
-	//fmt.Println("SPA ",   "client:",args.ClientId, " index:",index, "key", args.Key)
 	kv.mu.Unlock()
-	res := <-readChan
+	var res Op
+tryAgain:
+	select {
+	case res = <-readChan:
+	case <-time.After(time.Second * 1):
+		newTerm, isLeader := kv.rf.GetState()
+		if newTerm != term || !isLeader {
+			res = Op{}
+		} else {
+			goto tryAgain
+		}
+	}
 	kv.mu.Lock()
-	//fmt.Println("DEL PA ",  "client:",args.ClientId, " index:",index, "key", args.Key)
 	delete(kv.channelMap, args.ClientId)
 	kv.mu.Unlock()
 
@@ -258,7 +275,3 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	return kv
 }
-
-// TODOs:
-// 1. Make sure that there is no chance of a 4 way deadlock.
-// 2. correct races if any.

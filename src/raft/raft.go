@@ -317,8 +317,10 @@ func (rf *Raft) electLeader() {
 			// If the timeout occurs, start the election process again.
 			select {
 			case <-rf.electionTimeout.C:
+				rf.mu.Lock()
 				rf.electionTimeout.Reset(time.Millisecond *
 					time.Duration(rf.electionTimeoutVal))
+				rf.mu.Unlock()
 				goto retry
 			case <-out:
 				rf.mu.Lock()
