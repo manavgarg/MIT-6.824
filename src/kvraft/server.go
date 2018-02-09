@@ -31,9 +31,8 @@ type Op struct {
 }
 
 type channelMapVal struct {
-	retChan   chan Op
-	index     int
-	isDeleted bool
+	retChan chan Op
+	index   int
 }
 
 type RaftKV struct {
@@ -83,65 +82,79 @@ func (kv *RaftKV) listenApplyCh() {
 		}
 		kv.mu.Lock()
 		kv.clientLastRequestMap[command.ClientId] = command
-		// Loop thru all the entries in the map to track all the commands which
-		// were not commited. In this scenario, we just pass an ampty Op without
-		// setting the Err field.
-		tempMap := make(map[int64]*channelMapVal)
-		for k, v := range kv.channelMap {
-			tempMap[k] = v
-		}
-		kv.mu.Unlock()
 
-		for k, v := range tempMap {
-			kv.mu.Lock()
-			index := v.index
+		val, ok := kv.channelMap[command.ClientId]
+		if !ok || res.Index != val.index {
+			// This means that either this is not a leader (thus it cannot/doesnot
+			// need to write to channel as no client is waiting) or this is a new
+			// request by client (previous one timedout maybe).
 			kv.mu.Unlock()
-			if k == command.ClientId {
-				kv.mu.Lock()
-				writeChan := v.retChan
-				v.isDeleted = true
-				kv.mu.Unlock()
-				if res.Index == index {
-					writeChan <- command
-				}
-				continue
-			}
-			if res.Index >= index && index != -1 {
-				kv.mu.Lock()
-				writeChan := v.retChan
-				isDeleted := v.isDeleted
-				kv.mu.Unlock()
-				if !isDeleted {
-					kv.mu.Lock()
-					v.isDeleted = true
-					kv.mu.Unlock()
-					writeChan <- Op{}
-				}
-			}
+			continue
 		}
+		writeChan := val.retChan
+		writeChan <- command
+		kv.mu.Unlock()
 	}
 }
 
-func (kv *RaftKV) Get(args *GetArgs, reply *GetReply) {
+func (kv *RaftKV) preProcess(ClientId int64, RequestNo int64) (bool, Err, string) {
 	kv.mu.Lock()
 	// Handling duplicate requests (i.e committed requests should not be tried
 	// again). However, it does not protect against the case in which the client
 	// retries too soon again before actually the entry is committed (which is
 	// okay as one client only makes on request at a time).
-	val, ok := kv.clientLastRequestMap[args.ClientId]
-	if ok && val.RequestNo == args.RequestNo {
+	val, ok := kv.clientLastRequestMap[ClientId]
+	if ok && val.RequestNo == RequestNo {
 		// This is a duplicate request, ignore it.
-		reply.WrongLeader = false
-		reply.Err = val.Err
-		reply.Value = val.Value
 		kv.mu.Unlock()
+		return true, val.Err, val.Value
+	}
+
+	kv.channelMap[ClientId] = &channelMapVal{retChan: make(chan Op),
+		index: -1}
+	kv.mu.Unlock()
+	return false, "", ""
+}
+
+func (kv *RaftKV) postProcess(ClientId int64, index int, term int) (Err, string) {
+	kv.mu.Lock()
+	kv.channelMap[ClientId].index = index
+	readChan := kv.channelMap[ClientId].retChan
+	kv.mu.Unlock()
+	var res Op
+tryAgain:
+	select {
+	case res = <-readChan:
+		kv.mu.Lock()
+	case <-time.After(time.Second * 1):
+		// There is still a small possibility of a deadlock when in listenApplyCh
+		// we try to write it (acquire Lock after the above statement). That
+		// routine will block writing to channel & this one won't be able to consume.
+		kv.mu.Lock()
+		newTerm, isLeader := kv.rf.GetState()
+		if newTerm != term || !isLeader {
+			// If leader changes, then maybe this will never be replicated or
+			// committed, thus return an empty Op so client can retry.
+			res = Op{}
+		} else {
+			kv.mu.Unlock()
+			goto tryAgain
+		}
+	}
+	delete(kv.channelMap, ClientId)
+	kv.mu.Unlock()
+	return res.Err, res.Value
+}
+
+func (kv *RaftKV) Get(args *GetArgs, reply *GetReply) {
+	isDuplicate, err, value := kv.preProcess(args.ClientId, args.RequestNo)
+	if isDuplicate {
+		reply.WrongLeader = false
+		reply.Err = err
+		reply.Value = value
 		return
 	}
 
-	kv.channelMap[args.ClientId] = &channelMapVal{retChan: make(chan Op),
-		index: -1, isDeleted: false}
-	readChan := kv.channelMap[args.ClientId].retChan
-	kv.mu.Unlock()
 	index, term, isLeader := kv.rf.Start(Op{Key: args.Key, Op: "Get",
 		ClientId: args.ClientId, RequestNo: args.RequestNo})
 	if !isLeader {
@@ -152,49 +165,20 @@ func (kv *RaftKV) Get(args *GetArgs, reply *GetReply) {
 		return
 	}
 
-	kv.mu.Lock()
-	kv.channelMap[args.ClientId].index = index
-	kv.mu.Unlock()
-	var res Op
-tryAgain:
-	select {
-	case res = <-readChan:
-	case <-time.After(time.Second * 5):
-		newTerm, isLeader := kv.rf.GetState()
-		if newTerm != term || !isLeader {
-			res = Op{}
-		} else {
-			goto tryAgain
-		}
-	}
-	kv.mu.Lock()
-	delete(kv.channelMap, args.ClientId)
-	kv.mu.Unlock()
-
+	err, value = kv.postProcess(args.ClientId, index, term)
 	reply.WrongLeader = false
-	reply.Err = res.Err
-	reply.Value = res.Value
+	reply.Err = err
+	reply.Value = value
 }
 
 func (kv *RaftKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
-	kv.mu.Lock()
-	// Handling duplicate requests (i.e committed requests should not be tried
-	// again). However, it does not protect against the case in which the client
-	// retries too soon again before actually the entry is committed (which is
-	// okay as one client only makes on request at a time).
-	val, ok := kv.clientLastRequestMap[args.ClientId]
-	if ok && val.RequestNo == args.RequestNo {
-		// This is a duplicate request, ignore it.
+	isDuplicate, err, _ := kv.preProcess(args.ClientId, args.RequestNo)
+	if isDuplicate {
 		reply.WrongLeader = false
-		reply.Err = val.Err
-		kv.mu.Unlock()
+		reply.Err = err
 		return
 	}
 
-	kv.channelMap[args.ClientId] = &channelMapVal{retChan: make(chan Op),
-		index: -1, isDeleted: false}
-	readChan := kv.channelMap[args.ClientId].retChan
-	kv.mu.Unlock()
 	index, term, isLeader := kv.rf.Start(Op{Key: args.Key, Value: args.Value,
 		Op: args.Op, ClientId: args.ClientId, RequestNo: args.RequestNo})
 	if !isLeader {
@@ -205,27 +189,9 @@ func (kv *RaftKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		return
 	}
 
-	kv.mu.Lock()
-	kv.channelMap[args.ClientId].index = index
-	kv.mu.Unlock()
-	var res Op
-tryAgain:
-	select {
-	case res = <-readChan:
-	case <-time.After(time.Second * 1):
-		newTerm, isLeader := kv.rf.GetState()
-		if newTerm != term || !isLeader {
-			res = Op{}
-		} else {
-			goto tryAgain
-		}
-	}
-	kv.mu.Lock()
-	delete(kv.channelMap, args.ClientId)
-	kv.mu.Unlock()
-
+	err, _ = kv.postProcess(args.ClientId, index, term)
 	reply.WrongLeader = false
-	reply.Err = res.Err
+	reply.Err = err
 }
 
 //
