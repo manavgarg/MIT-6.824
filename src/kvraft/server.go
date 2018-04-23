@@ -8,6 +8,7 @@ import (
 	"raft"
 	"sync"
 	"time"
+	"bytes"
 )
 
 const Debug = 0
@@ -44,16 +45,45 @@ type RaftKV struct {
 	maxraftstate int // snapshot if log grows this big
 
 	channelMap           map[int64]*channelMapVal
-	kvStore              map[string]string
-	clientLastRequestMap map[int64]Op
+	KvStore              map[string]string
+	ClientLastRequestMap map[int64]Op
+
+	LastAppliedIndex int // LastAppliedIndex by raft, index numbering starts from 1 here.
+	LastIncludedIndex int // Index last included in snapshot state, index numbering starts from 1 here.
+}
+
+// read the state from snapshot.
+func (kv *RaftKV) readSnapshot(data []byte) {
+	kv.mu.Lock()
+	r := bytes.NewBuffer(data)
+	d := gob.NewDecoder(r)
+	d.Decode(&kv.KvStore)
+	d.Decode(&kv.ClientLastRequestMap)
+	d.Decode(&kv.LastAppliedIndex)
+	d.Decode(&kv.LastIncludedIndex)
+	kv.mu.Unlock()
 }
 
 func (kv *RaftKV) listenApplyCh() {
 	for {
 		res := <-kv.applyCh
+
+		// Check if the response is snapshot.
+		if res.UseSnapshot == true {
+			kv.readSnapshot(res.Snapshot)
+			continue
+		}
+		kv.mu.Lock()
+		// If the index is <= to the last included index in snapshot, continue.
+		if res.Index <= kv.LastIncludedIndex {
+			kv.mu.Unlock()
+			continue
+		}
+		kv.mu.Unlock()
+
 		command := res.Command.(Op)
 		if command.Op == "Get" {
-			if val, ok := kv.kvStore[command.Key]; ok {
+			if val, ok := kv.KvStore[command.Key]; ok {
 				command.Value = val
 				command.Err = OK
 			} else {
@@ -68,20 +98,26 @@ func (kv *RaftKV) listenApplyCh() {
 				// waiting and eventually retry. Now, when this duplicated
 				// request is committed, the original is also committed. Thus,
 				// we will see the same entry applied twice (Get is idempotent).
-				val, ok := kv.clientLastRequestMap[command.ClientId]
+				val, ok := kv.ClientLastRequestMap[command.ClientId]
 				if !ok || val.RequestNo != command.RequestNo {
-					kv.kvStore[command.Key] = command.Value
+					kv.mu.Lock()
+					kv.KvStore[command.Key] = command.Value
+					kv.LastAppliedIndex = res.Index
+					kv.mu.Unlock()
 				}
 			} else {
-				val, ok := kv.clientLastRequestMap[command.ClientId]
+				val, ok := kv.ClientLastRequestMap[command.ClientId]
 				if !ok || val.RequestNo != command.RequestNo {
-					kv.kvStore[command.Key] += command.Value
+					kv.mu.Lock()
+					kv.KvStore[command.Key] += command.Value
+					kv.LastAppliedIndex = res.Index
+					kv.mu.Unlock()
 				}
 			}
 			command.Err = OK
 		}
 		kv.mu.Lock()
-		kv.clientLastRequestMap[command.ClientId] = command
+		kv.ClientLastRequestMap[command.ClientId] = command
 
 		val, ok := kv.channelMap[command.ClientId]
 		if !ok || res.Index != val.index {
@@ -103,7 +139,7 @@ func (kv *RaftKV) preProcess(ClientId int64, RequestNo int64) (bool, Err, string
 	// again). However, it does not protect against the case in which the client
 	// retries too soon again before actually the entry is committed (which is
 	// okay as one client only makes on request at a time).
-	val, ok := kv.clientLastRequestMap[ClientId]
+	val, ok := kv.ClientLastRequestMap[ClientId]
 	if ok && val.RequestNo == RequestNo {
 		// This is a duplicate request, ignore it.
 		kv.mu.Unlock()
@@ -205,6 +241,29 @@ func (kv *RaftKV) Kill() {
 	// Your code here, if desired.
 }
 
+func (kv *RaftKV) createSnapshot(persister *raft.Persister) {
+	// TODO: check whether we need to persist commit and applied offset in raft
+	// TODO: also as we might not want to replay the entire log now in raft but onl
+	// TODO: after snapshotted stuf. check this.
+	ticker := time.NewTicker(time.Millisecond * 150)
+	for _ = range ticker.C {
+		if persister.RaftStateSize() > kv.maxraftstate {
+			w := new(bytes.Buffer)
+			e := gob.NewEncoder(w)
+			kv.mu.Lock()
+			kv.LastIncludedIndex = kv.LastAppliedIndex
+			e.Encode(kv.KvStore)
+			e.Encode(kv.ClientLastRequestMap)
+			e.Encode(kv.LastAppliedIndex)
+			e.Encode(kv.LastIncludedIndex)
+			data := w.Bytes()
+			persister.SaveSnapshot(data)
+			kv.rf.TruncateLog(kv.LastAppliedIndex - 1) // Index numbering starts from 1 unlike raft.
+			kv.mu.Unlock()
+		}
+	}
+}
+
 //
 // servers[] contains the ports of the set of
 // servers that will cooperate via Raft to
@@ -229,15 +288,19 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.maxraftstate = maxraftstate
 
 	// You may need initialization code here.
-	kv.kvStore = make(map[string]string)
+	kv.KvStore = make(map[string]string)
 	kv.channelMap = make(map[int64]*channelMapVal)
-	kv.clientLastRequestMap = make(map[int64]Op)
+	kv.ClientLastRequestMap = make(map[int64]Op)
+	kv.readSnapshot(persister.ReadSnapshot())
 
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
 	// You may need initialization code here.
 	go kv.listenApplyCh()
+	if maxraftstate != -1 {
+		 go kv.createSnapshot(persister)
+	}
 
 	return kv
 }
