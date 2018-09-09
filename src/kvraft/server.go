@@ -1,6 +1,7 @@
 package raftkv
 
 import (
+	"bytes"
 	"encoding/gob"
 	"fmt"
 	"labrpc"
@@ -8,7 +9,6 @@ import (
 	"raft"
 	"sync"
 	"time"
-	"bytes"
 )
 
 const Debug = 0
@@ -48,7 +48,7 @@ type RaftKV struct {
 	KvStore              map[string]string
 	ClientLastRequestMap map[int64]Op
 
-	LastAppliedIndex int // LastAppliedIndex by raft, index numbering starts from 1 here.
+	LastAppliedIndex  int // LastAppliedIndex by raft, index numbering starts from 1 here.
 	LastIncludedIndex int // Index last included in snapshot state, index numbering starts from 1 here.
 }
 
@@ -242,9 +242,6 @@ func (kv *RaftKV) Kill() {
 }
 
 func (kv *RaftKV) createSnapshot(persister *raft.Persister) {
-	// TODO: check whether we need to persist commit and applied offset in raft
-	// TODO: also as we might not want to replay the entire log now in raft but onl
-	// TODO: after snapshotted stuf. check this.
 	ticker := time.NewTicker(time.Millisecond * 150)
 	for _ = range ticker.C {
 		if persister.RaftStateSize() > kv.maxraftstate {
@@ -277,7 +274,8 @@ func (kv *RaftKV) createSnapshot(persister *raft.Persister) {
 // StartKVServer() must return quickly, so it should start goroutines
 // for any long-running work.
 //
-func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister, maxraftstate int) *RaftKV {
+func StartKVServer(servers []*labrpc.ClientEnd, me int,
+	persister *raft.Persister, maxraftstate int) *RaftKV {
 	// call gob.Register on structures you want
 	// Go's RPC library to marshall/unmarshall.
 	gob.Register(Op{})
@@ -299,7 +297,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	// You may need initialization code here.
 	go kv.listenApplyCh()
 	if maxraftstate != -1 {
-		 go kv.createSnapshot(persister)
+		go kv.createSnapshot(persister)
 	}
 
 	return kv
